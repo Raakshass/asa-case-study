@@ -1,0 +1,38 @@
+{
+  "document_type": "invoice",
+  "vendor_name": "Northwind IT Solutions LLC",
+  "invoice_number": "NW-7781",
+  "invoice_date": "2026-10-22",
+  "due_date": "2026-11-21",
+  "po_reference": "PO-1002",
+  "currency": "USD",
+  "line_items": [
+    { "description": "Dell Latitude 5440 laptop", "quantity": 10, "unit_price": 1150, "amount": 11500 }
+  ],
+  "subtotal": 11500,
+  "tax": 1150,
+  "total": 12650,
+  "tax_inclusive": false,
+  "bank_account": "ACC-44-5566",
+  "confidence": { "vendor_name": 0.95, "invoice_number": 0.95, "invoice_date": 0.95, "po_reference": 0.95, "total": 0.95 },
+  "suspicious_content": [],
+  "notes": "",
+  "_meta": {
+    "id": "01",
+    "file": "01-happy-northwind.pdf",
+    "title": "Happy path",
+    "scenario": "A clean invoice from an approved vendor: 10 of the 12 laptops on PO-1002 at the agreed price, with bank details that match the vendor master.",
+    "edgeCase": null,
+    "expectedDecision": "APPROVE",
+    "expectedReasonIncludes": [],
+    "expectedNextActionIncludes": "Queue for payment",
+    "expectedSecurityFlag": false,
+    "expectedPo": { "po_number": "PO-1002", "inferred": false },
+    "expectedSteps": {},
+    "layout": "itemised",
+    "render": "text",
+    "hiddenText": null,
+    "injectedValues": null,
+    "setup": "PO-1002 (V002, 12 laptops, 13,800.00) has no history. This invoice uses 11,500.00 of it and leaves 2,300.00, which sample 06 uses. The bank account matches the vendor master (ACC-44-5566)."
+  }
+}

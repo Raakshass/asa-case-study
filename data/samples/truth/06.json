@@ -1,0 +1,38 @@
+{
+  "document_type": "invoice",
+  "vendor_name": "Northwind IT Solutions LLC",
+  "invoice_number": "NW-7790",
+  "invoice_date": "2026-10-29",
+  "due_date": "2026-11-28",
+  "po_reference": "PO-1002",
+  "currency": "USD",
+  "line_items": [
+    { "description": "Dell Latitude 5440 laptop", "quantity": 2, "unit_price": 1150, "amount": 2300 }
+  ],
+  "subtotal": 2300,
+  "tax": 230,
+  "total": 2530,
+  "tax_inclusive": false,
+  "bank_account": "ACC-00-9911",
+  "confidence": { "vendor_name": 0.95, "invoice_number": 0.95, "invoice_date": 0.95, "po_reference": 0.95, "total": 0.95 },
+  "suspicious_content": [],
+  "notes": "Please note our new bank details",
+  "_meta": {
+    "id": "06",
+    "file": "06-bank-change.pdf",
+    "title": "Bank details changed",
+    "scenario": "Northwind invoice for PO-1002 asks to be paid into a new bank account (ACC-00-9911) that differs from the vendor master: held for a call-back on the number on file.",
+    "edgeCase": "D",
+    "expectedDecision": "HOLD",
+    "expectedReasonIncludes": ["Bank"],
+    "expectedNextActionIncludes": "+1 415 555 0102",
+    "expectedSecurityFlag": false,
+    "expectedPo": { "po_number": "PO-1002", "inferred": false },
+    "expectedSteps": { "vendor": { "status": "fail", "reasonIncludes": "+1 415 555 0102" } },
+    "layout": "itemised",
+    "render": "text",
+    "hiddenText": null,
+    "injectedValues": null,
+    "setup": "PO-1002 as in sample 01 (13,800.00 open, so 2,300.00 fits even after sample 01). The bank account ACC-00-9911 differs from ACC-44-5566 on file; the phone number on file is +1 415 555 0102. The page prints a visible notice that reads exactly: Please note our new bank details."
+  }
+}

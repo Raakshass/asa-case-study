@@ -1,0 +1,38 @@
+{
+  "document_type": "invoice",
+  "vendor_name": "Initech Facilities Co.",
+  "invoice_number": "IF-2210",
+  "invoice_date": "2026-10-27",
+  "due_date": "2026-11-26",
+  "po_reference": null,
+  "currency": "USD",
+  "line_items": [
+    { "description": "HVAC maintenance - 2 visits", "quantity": 2, "unit_price": 750, "amount": 1500 }
+  ],
+  "subtotal": 1500,
+  "tax": 150,
+  "total": 1650,
+  "tax_inclusive": false,
+  "bank_account": "ACC-12-3456",
+  "confidence": { "vendor_name": 0.9, "invoice_number": 0.9, "invoice_date": 0.9, "po_reference": 0.9, "total": 0.9 },
+  "suspicious_content": [],
+  "notes": "",
+  "_meta": {
+    "id": "05",
+    "file": "05-scanned-no-po.pdf",
+    "title": "Scanned, no PO number",
+    "scenario": "Image-only scan with no PO number. Initech has two open POs, so the PO is inferred from the line description and a person must confirm it.",
+    "edgeCase": "C",
+    "expectedDecision": "HOLD",
+    "expectedReasonIncludes": ["inferred"],
+    "expectedNextActionIncludes": "confirm PO-1005",
+    "expectedSecurityFlag": false,
+    "expectedPo": { "po_number": "PO-1005", "inferred": true },
+    "expectedSteps": { "po_match": { "status": "warn", "reasonIncludes": "PO-1005" } },
+    "layout": "services",
+    "render": "scanned",
+    "hiddenText": null,
+    "injectedValues": null,
+    "setup": "Initech (V004) has two open POs that cover 1,500.00: PO-1004 (office deep cleaning, 6,000.00) and PO-1005 (HVAC maintenance visits, 3,000.00). The page is an image only (slightly rotated, with noise) and has no text layer, so grounding is skipped. Confidences are 0.9 instead of 0.95."
+  }
+}

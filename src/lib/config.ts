@@ -54,6 +54,9 @@ export const CONFIG = {
   llmRetryAfterDefaultMs: 2_000, // 429 without Retry-After
   rateLimitPerIpPerMinute: 10,
   maxDisplayNameChars: 100,
+
+  // ---- added at integration (docs/CONTRACT_CHANGES.md) ----
+  maxTaxRate: 0.1, // demo tax rate (ASSUMPTIONS.md); tax above this share of the pre-tax amount (+ cents) -> HOLD
 } as const;
 
 export type MockMode = "off" | "truth" | "fooled";

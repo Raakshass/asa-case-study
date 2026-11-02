@@ -1,0 +1,38 @@
+{
+  "document_type": "invoice",
+  "vendor_name": "Globex Logistics Ltd",
+  "invoice_number": "GLX-303",
+  "invoice_date": "2026-10-26",
+  "due_date": "2026-11-25",
+  "po_reference": "PO-1003",
+  "currency": "USD",
+  "line_items": [
+    { "description": "Freight services Q4 (lump sum)", "quantity": 1, "unit_price": 9000, "amount": 9000 }
+  ],
+  "subtotal": 9000,
+  "tax": 900,
+  "total": 9900,
+  "tax_inclusive": false,
+  "bank_account": "ACC-77-8899",
+  "confidence": { "vendor_name": 0.95, "invoice_number": 0.95, "invoice_date": 0.95, "po_reference": 0.95, "total": 0.95 },
+  "suspicious_content": [],
+  "notes": "",
+  "_meta": {
+    "id": "03",
+    "file": "03-split-po-overbill.pdf",
+    "title": "Split-PO over-billing",
+    "scenario": "Freight invoice of 9,000 against PO-1003, which has only 6,000 left after two earlier invoices: held for a PO amendment.",
+    "edgeCase": "A",
+    "expectedDecision": "HOLD",
+    "expectedReasonIncludes": ["remaining"],
+    "expectedNextActionIncludes": "PO amendment",
+    "expectedSecurityFlag": false,
+    "expectedPo": { "po_number": "PO-1003", "inferred": false },
+    "expectedSteps": { "amounts": { "status": "fail", "reasonIncludes": "remaining" } },
+    "layout": "services",
+    "render": "text",
+    "hiddenText": null,
+    "injectedValues": null,
+    "setup": "PO-1003 (V003, 30,000.00) already has 24,000.00 approved (GLX-301 and GLX-302, 12,000.00 each), so 6,000.00 remains. This invoice is 9,000.00 before tax: 3,000.00 over the remaining balance."
+  }
+}

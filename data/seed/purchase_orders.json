@@ -1,0 +1,84 @@
+[
+  {
+    "po_number": "PO-1001",
+    "vendor_id": "V001",
+    "lines": [
+      { "description": "Printer paper box", "quantity": 50, "unit_price": 24.00, "amount": 1200.00 },
+      { "description": "Toner cartridge", "quantity": 20, "unit_price": 85.00, "amount": 1700.00 }
+    ],
+    "subtotal": 2900.00,
+    "currency": "USD",
+    "status": "open"
+  },
+  {
+    "po_number": "PO-1002",
+    "vendor_id": "V002",
+    "lines": [
+      { "description": "Dell Latitude 5440 laptop", "quantity": 12, "unit_price": 1150.00, "amount": 13800.00 }
+    ],
+    "subtotal": 13800.00,
+    "currency": "USD",
+    "status": "open"
+  },
+  {
+    "po_number": "PO-1003",
+    "vendor_id": "V003",
+    "lines": [
+      { "description": "Freight services Q4 (lump sum)", "quantity": 1, "unit_price": 30000.00, "amount": 30000.00 }
+    ],
+    "subtotal": 30000.00,
+    "currency": "USD",
+    "status": "open"
+  },
+  {
+    "po_number": "PO-1004",
+    "vendor_id": "V004",
+    "lines": [
+      { "description": "Office deep cleaning", "quantity": 3, "unit_price": 2000.00, "amount": 6000.00 }
+    ],
+    "subtotal": 6000.00,
+    "currency": "USD",
+    "status": "open"
+  },
+  {
+    "po_number": "PO-1005",
+    "vendor_id": "V004",
+    "lines": [
+      { "description": "HVAC maintenance visit", "quantity": 4, "unit_price": 750.00, "amount": 3000.00 }
+    ],
+    "subtotal": 3000.00,
+    "currency": "USD",
+    "status": "open"
+  },
+  {
+    "po_number": "PO-1006",
+    "vendor_id": "V001",
+    "lines": [
+      { "description": "Monthly stationery subscription", "quantity": 12, "unit_price": 400.00, "amount": 4800.00 }
+    ],
+    "subtotal": 4800.00,
+    "currency": "USD",
+    "status": "open"
+  },
+  {
+    "po_number": "PO-1007",
+    "vendor_id": "V001",
+    "lines": [
+      { "description": "Printer paper box", "quantity": 50, "unit_price": 24.00, "amount": 1200.00 },
+      { "description": "Toner cartridge", "quantity": 20, "unit_price": 85.00, "amount": 1700.00 }
+    ],
+    "subtotal": 2900.00,
+    "currency": "USD",
+    "status": "open"
+  },
+  {
+    "po_number": "PO-1008",
+    "vendor_id": "V003",
+    "lines": [
+      { "description": "Warehouse racking installation", "quantity": 1, "unit_price": 4200.00, "amount": 4200.00 }
+    ],
+    "subtotal": 4200.00,
+    "currency": "USD",
+    "status": "open"
+  }
+]

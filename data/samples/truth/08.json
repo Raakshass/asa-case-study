@@ -1,0 +1,38 @@
+{
+  "document_type": "invoice",
+  "vendor_name": "Umbrella Consulting",
+  "invoice_number": "UC-001",
+  "invoice_date": "2026-10-23",
+  "due_date": "2026-11-22",
+  "po_reference": null,
+  "currency": "USD",
+  "line_items": [
+    { "description": "Consulting services - October", "quantity": 1, "unit_price": 5000, "amount": 5000 }
+  ],
+  "subtotal": 5000,
+  "tax": 500,
+  "total": 5500,
+  "tax_inclusive": false,
+  "bank_account": "ACC-99-0000",
+  "confidence": { "vendor_name": 0.95, "invoice_number": 0.95, "invoice_date": 0.95, "po_reference": 0.95, "total": 0.95 },
+  "suspicious_content": [],
+  "notes": "",
+  "_meta": {
+    "id": "08",
+    "file": "08-unapproved-vendor.pdf",
+    "title": "Vendor not onboarded",
+    "scenario": "Umbrella Consulting is not an approved vendor and the invoice has no PO: rejected and routed to vendor onboarding.",
+    "edgeCase": null,
+    "expectedDecision": "REJECT",
+    "expectedReasonIncludes": ["onboarding"],
+    "expectedNextActionIncludes": "onboarding",
+    "expectedSecurityFlag": false,
+    "expectedPo": null,
+    "expectedSteps": { "vendor": { "status": "fail", "reasonIncludes": "onboarding" } },
+    "layout": "services",
+    "render": "text",
+    "hiddenText": null,
+    "injectedValues": null,
+    "setup": "V005 is in the vendor master but is not approved (onboarding not done); no phone number is on file and it has no purchase orders. The bank account ACC-99-0000 matches the master."
+  }
+}

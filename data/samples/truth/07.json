@@ -1,0 +1,38 @@
+{
+  "document_type": "invoice",
+  "vendor_name": "Acme Office Supplies Inc.",
+  "invoice_number": "ST-2026-10",
+  "invoice_date": "2026-10-31",
+  "due_date": "2026-11-30",
+  "po_reference": "PO-1006",
+  "currency": "USD",
+  "line_items": [
+    { "description": "Monthly stationery subscription", "quantity": 1, "unit_price": 400, "amount": 400 }
+  ],
+  "subtotal": 400,
+  "tax": 40,
+  "total": 440,
+  "tax_inclusive": false,
+  "bank_account": "ACC-11-2233",
+  "confidence": { "vendor_name": 0.95, "invoice_number": 0.95, "invoice_date": 0.95, "po_reference": 0.95, "total": 0.95 },
+  "suspicious_content": [],
+  "notes": "",
+  "_meta": {
+    "id": "07",
+    "file": "07-recurring-not-duplicate.pdf",
+    "title": "Recurring, not a duplicate",
+    "scenario": "Monthly stationery subscription of 400: the same amount as September's invoice but a different number and 31 days later, so it is a recurring charge, not a duplicate.",
+    "edgeCase": null,
+    "expectedDecision": "APPROVE",
+    "expectedReasonIncludes": [],
+    "expectedNextActionIncludes": "Queue for payment",
+    "expectedSecurityFlag": false,
+    "expectedPo": { "po_number": "PO-1006", "inferred": false },
+    "expectedSteps": { "duplicate": { "status": "pass", "reasonIncludes": "recurring" } },
+    "layout": "compact",
+    "render": "text",
+    "hiddenText": null,
+    "injectedValues": null,
+    "setup": "PO-1006 (V001, 12 monthly payments of 400.00, 4,800.00) has ST-2026-09 (400.00, dated 2026-09-30) approved, so 4,400.00 remains. This invoice is dated 2026-10-31: the same vendor and amount, 31 days later, with a different number."
+  }
+}

@@ -1,0 +1,42 @@
+[
+  {
+    "id": "V001",
+    "name": "Acme Office Supplies Inc.",
+    "aliases": ["Acme Office Supplies", "ACME Supplies"],
+    "approved": true,
+    "bank_account": "ACC-11-2233",
+    "phone_on_file": "+1 415 555 0101"
+  },
+  {
+    "id": "V002",
+    "name": "Northwind IT Solutions LLC",
+    "aliases": ["Northwind IT", "Northwind"],
+    "approved": true,
+    "bank_account": "ACC-44-5566",
+    "phone_on_file": "+1 415 555 0102"
+  },
+  {
+    "id": "V003",
+    "name": "Globex Logistics Ltd",
+    "aliases": ["Globex"],
+    "approved": true,
+    "bank_account": "ACC-77-8899",
+    "phone_on_file": "+1 415 555 0103"
+  },
+  {
+    "id": "V004",
+    "name": "Initech Facilities Co.",
+    "aliases": ["Initech"],
+    "approved": true,
+    "bank_account": "ACC-12-3456",
+    "phone_on_file": "+1 415 555 0104"
+  },
+  {
+    "id": "V005",
+    "name": "Umbrella Consulting",
+    "aliases": [],
+    "approved": false,
+    "bank_account": "ACC-99-0000",
+    "phone_on_file": null
+  }
+]

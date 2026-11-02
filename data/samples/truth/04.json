@@ -1,0 +1,42 @@
+{
+  "document_type": "invoice",
+  "vendor_name": "Acme Office Supplies Inc.",
+  "invoice_number": "INV0042",
+  "invoice_date": "2026-10-28",
+  "due_date": "2026-11-27",
+  "po_reference": "PO-1001",
+  "currency": "USD",
+  "line_items": [
+    { "description": "Printer paper box", "quantity": 50, "unit_price": 24, "amount": 1200 },
+    { "description": "Toner cartridge", "quantity": 20, "unit_price": 85, "amount": 1700 }
+  ],
+  "subtotal": 2900,
+  "tax": 290,
+  "total": 3190,
+  "tax_inclusive": false,
+  "bank_account": "ACC-11-2233",
+  "confidence": { "vendor_name": 0.95, "invoice_number": 0.95, "invoice_date": 0.95, "po_reference": 0.95, "total": 0.95 },
+  "suspicious_content": [],
+  "notes": "",
+  "_meta": {
+    "id": "04",
+    "file": "04-disguised-duplicate.pdf",
+    "title": "Disguised duplicate",
+    "scenario": "Invoice INV0042 (no hyphen, different layout) repeats INV-0042, which was already approved against PO-1001: rejected as a duplicate.",
+    "edgeCase": "B",
+    "expectedDecision": "REJECT",
+    "expectedReasonIncludes": ["Duplicate"],
+    "expectedNextActionIncludes": "already processed under INV-0042",
+    "expectedSecurityFlag": false,
+    "expectedPo": { "po_number": "PO-1001", "inferred": false },
+    "expectedSteps": {
+      "duplicate": { "status": "fail", "reasonIncludes": "INV-0042" },
+      "amounts": { "status": "fail" }
+    },
+    "layout": "compact",
+    "render": "text",
+    "hiddenText": null,
+    "injectedValues": null,
+    "setup": "History has INV-0042 (V001, PO-1001, 2,900.00, 2026-10-05), approved, which used all of PO-1001 (remaining 0). This invoice has the same lines and subtotal, and its number differs only by the missing hyphen. It uses the compact layout, unlike sample 02."
+  }
+}

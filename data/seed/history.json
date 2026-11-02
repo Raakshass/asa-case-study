@@ -1,0 +1,50 @@
+[
+  {
+    "vendor_id": "V001",
+    "invoice_number": "INV-0042",
+    "invoice_date": "2026-10-05",
+    "po_number": "PO-1001",
+    "subtotal": 2900.00,
+    "tax": 290.00,
+    "total": 3190.00,
+    "currency": "USD",
+    "bank_account": "ACC-11-2233",
+    "decision": "APPROVE"
+  },
+  {
+    "vendor_id": "V003",
+    "invoice_number": "GLX-301",
+    "invoice_date": "2026-08-14",
+    "po_number": "PO-1003",
+    "subtotal": 12000.00,
+    "tax": 1200.00,
+    "total": 13200.00,
+    "currency": "USD",
+    "bank_account": "ACC-77-8899",
+    "decision": "APPROVE"
+  },
+  {
+    "vendor_id": "V003",
+    "invoice_number": "GLX-302",
+    "invoice_date": "2026-09-15",
+    "po_number": "PO-1003",
+    "subtotal": 12000.00,
+    "tax": 1200.00,
+    "total": 13200.00,
+    "currency": "USD",
+    "bank_account": "ACC-77-8899",
+    "decision": "APPROVE"
+  },
+  {
+    "vendor_id": "V001",
+    "invoice_number": "ST-2026-09",
+    "invoice_date": "2026-09-30",
+    "po_number": "PO-1006",
+    "subtotal": 400.00,
+    "tax": 40.00,
+    "total": 440.00,
+    "currency": "USD",
+    "bank_account": "ACC-11-2233",
+    "decision": "APPROVE"
+  }
+]
