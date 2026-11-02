@@ -5,6 +5,7 @@
 - Keep decision logic in plain TypeScript (`src/lib/rules.ts`). Every rule returns a human-readable reason.
 - No extra abstractions, ORMs, auth systems or queues beyond what IMPLEMENTATION_PLAN.md specifies. One Next.js app, one SQLite file.
 - Never put `OPENROUTER_API_KEY` in client code or in a `NEXT_PUBLIC_` variable.
+- `docs/CONTRACTS.md` is authoritative for module signatures, data-file shapes, row conventions and file ownership; read it before touching code. Edit only the files your task owns.
 - `IMPLEMENTATION_PLAN.md` is the spec. Implement it exactly. If something in it is wrong or impossible, make the smallest deviation and record it in `ASSUMPTIONS.md` under "Deviations from the plan".
 - Do not run `git commit` unless your task says so (parallel agents share the working tree; the orchestrator commits).
 - Do not use `dangerouslySetInnerHTML` anywhere.
