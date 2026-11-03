@@ -1,0 +1,33 @@
+# Kept out of the Docker build context (see Dockerfile). The build needs package*.json, next.config.ts, tsconfig.json,
+# eslint.config.mjs, postcss.config.mjs, src/, scripts/ (next build type-checks them) and data/ (seed, samples,
+# fixtures); the runtime stage then copies only what `next start` needs.
+# Patterns are matched from the context root; **/ matches in every folder.
+
+# dependencies and build output: always rebuilt inside the image
+node_modules
+.next
+out
+build
+coverage
+**/*.tsbuildinfo
+
+# git metadata
+.git
+
+# secrets: no .env file ever enters the image (variables come from the host at run time)
+**/.env*
+!.env.example
+
+# runtime state of a local run (the image keeps its own under DATA_DIR=/app/storage)
+data/app.db*
+data/uploads/*
+
+# local test output, scratch and editor files
+test-results
+playwright-report
+scratch
+tmp
+**/*.log
+**/.DS_Store
+.vscode
+.idea
