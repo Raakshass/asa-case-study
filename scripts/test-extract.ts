@@ -28,6 +28,7 @@ import {
   EXTRACT_SYSTEM_PROMPT,
   EXTRACT_USER_TEXT,
   MODEL_PROFILES,
+  PROMPT_VERSION,
   SUGGEST_PO_SYSTEM_PROMPT,
   extractInvoice,
   getExtractor,
@@ -509,6 +510,23 @@ async function requestTests(t: Check): Promise<void> {
     const d = props.tax_inclusive?.description ?? "";
     t.ok(/false when/.test(d) && /subtotal \+ tax = total/.test(d), `the usual case (tax added to the subtotal) is named: ${d}`);
     t.ok(/true only if/.test(d) && /equals the subtotal/.test(d), `the rare case (prices already include tax) is named: ${d}`);
+  });
+
+  await t.test("schema and prompt: document_signals is required, described and asked for, and PROMPT_VERSION is extract-v3 (review round B2)", () => {
+    const schema = JSON.parse(JSON.stringify(INVOICE_JSON_SCHEMA)) as {
+      required: string[];
+      properties: Record<string, { required?: string[]; properties?: Record<string, { type?: string; description?: string }> }>;
+    };
+    t.ok(schema.required.includes("document_signals"), "required in the strict schema");
+    const flags = schema.properties.document_signals;
+    t.eq(flags.required, ["multiple_documents", "bank_change_notice", "handwritten_changes"]);
+    for (const name of ["multiple_documents", "bank_change_notice", "handwritten_changes"]) t.eq(flags.properties?.[name]?.type, "boolean", name);
+    t.includes(flags.properties?.multiple_documents?.description, "more than one invoice or document");
+    t.includes(flags.properties?.bank_change_notice?.description, "new or changed bank or payment details");
+    t.includes(flags.properties?.handwritten_changes?.description, "changed by hand");
+    t.includes(EXTRACT_SYSTEM_PROMPT, "Also set the flags in `document_signals`");
+    for (const name of ["multiple_documents", "bank_change_notice", "handwritten_changes"]) t.includes(EXTRACT_SYSTEM_PROMPT, `\`${name}\``, `the system prompt names ${name}`);
+    t.eq(PROMPT_VERSION, "extract-v3");
   });
 
   await t.test("extract: tax_inclusive true is corrected to false when subtotal + tax = total, with a note; the raw output keeps what the model said", async () => {

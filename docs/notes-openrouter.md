@@ -227,7 +227,7 @@ export function buildExtractRequestBody(args: {
   model: string;
   pdf: Buffer; // bytes already validated by stage 1 (%PDF-, <= 10 MB, <= 5 pages)
   isImageOnly: boolean; // from the stage-2 screen (text layer < 20 chars)
-  systemPrompt: string; // PROMPT_VERSION "extract-v2" (v1 until 2026-11-03)
+  systemPrompt: string; // PROMPT_VERSION "extract-v3" (v2 and v1 before 2026-11-03 and the review round B2)
   engineOverride?: PdfEngine; // eval-extract only, e.g. force "mistral-ocr"
 }): ChatRequestBody {
   const profile = MODEL_PROFILES[args.model];

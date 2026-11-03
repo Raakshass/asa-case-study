@@ -150,7 +150,10 @@ export async function run(t: Check): Promise<void> {
       ["Infinity subtotal", JSON.parse(JSON.stringify(s).replace('"subtotal":11500', '"subtotal":1e999'))],
       ["missing due_date", Object.fromEntries(Object.entries(s).filter(([k]) => k !== "due_date"))],
       ["missing document_signals", Object.fromEntries(Object.entries(s).filter(([k]) => k !== "document_signals"))],
-      ["a document_signals flag that is not a boolean", { ...s, document_signals: { ...s.document_signals, handwritten_changes: "no" } }],
+      ["multiple_documents that is not a boolean", { ...s, document_signals: { ...s.document_signals, multiple_documents: 1 } }],
+      ["bank_change_notice that is not a boolean", { ...s, document_signals: { ...s.document_signals, bank_change_notice: "yes" } }],
+      ["handwritten_changes that is not a boolean", { ...s, document_signals: { ...s.document_signals, handwritten_changes: "no" } }],
+      ["document_signals without one flag", { ...s, document_signals: { multiple_documents: false, bank_change_notice: false } }],
       ["unknown document_type", { ...s, document_type: "bill" }],
       ["21 suspicious items", { ...s, suspicious_content: Array.from({ length: 21 }, () => "x") }],
     ];
@@ -160,6 +163,13 @@ export async function run(t: Check): Promise<void> {
     const extra = InvoiceExtractionSchema.parse({ ...s, unexpected: "x" }) as Record<string, unknown>;
     t.ok(!("unexpected" in extra), "unknown keys are stripped");
     t.ok(InvoiceExtractionSchema.safeParse({ ...s, suspicious_content: ["q".repeat(450)] }).success, "a 450-char verbatim quote is allowed");
+  });
+
+  await t.test("B2: only sample 06 reports a bank-change notice; no sample reports multiple documents or handwritten changes", () => {
+    for (const sample of loadTruthSamples()) {
+      const want = { multiple_documents: false, bank_change_notice: sample.meta.id === "06", handwritten_changes: false };
+      t.eq(sample.extraction.document_signals, want, `sample ${sample.meta.id}`);
+    }
   });
 
   await t.test("B2: a run stored before document_signals existed reads as 'nothing reported'; stored signals are kept; a bad cell is still null", () => {

@@ -881,6 +881,9 @@ export async function run(t: Check): Promise<void> {
     t.eq(editDistance("initech", "iintech"), 1, "a swap counts as one");
     t.eq(editDistance("acme", "acme"), 0);
     t.eq(editDistance("", "abc"), 3);
+    t.eq(editDistance("abc", ""), 3, "an empty second argument");
+    t.eq(editDistance("xabc", "abc"), 1, "a leading deletion");
+    t.eq(editDistance("abcd", "badc"), 2, "two separate swaps");
   });
 
   await t.test("B3: closeVendorMatches limits (6+ characters, 1 edit under 12, 2 from 12, exact matches left to resolveVendor)", () => {
@@ -902,6 +905,44 @@ export async function run(t: Check): Promise<void> {
     t.eq([st.steps.vendor?.status, st.steps.vendor?.severity], ["fail", "hold"]);
     t.eq([st.steps.po_match?.status, st.steps.duplicate?.status], ["skipped", "skipped"]);
     t.eq(st.action, "Confirm which vendor issued this invoice against the vendor master, then re-key the vendor name.");
+  });
+
+  await t.test("B3: the near-miss reason and evidence are exact, for one close vendor and for two", () => {
+    const one = vendorCheck(seededSnapshot(), ex({ vendor_name: "Glovex Logistics Ltd" }));
+    t.eq(one.reason, 'Vendor "Glovex Logistics Ltd" is not in the vendor master; the closest match is Globex Logistics Ltd (V003). Confirm the vendor before this invoice is processed.');
+    t.eq(one.detail, { vendor_id: null, close_vendor_ids: ["V003"], bank_mismatch: false });
+    const snap = seededSnapshot();
+    snap.vendors.push({ id: "V006", name: "Globax Logistics Ltd", aliases: [], approved: true, bank_account: null, phone_on_file: null });
+    const two = vendorCheck(snap, ex({ vendor_name: "Glovex Logistics Ltd" }));
+    t.eq([two.status, two.severity], ["fail", "hold"]);
+    t.eq(two.detail?.close_vendor_ids, ["V003", "V006"], "master order");
+    t.eq(two.reason, 'Vendor "Glovex Logistics Ltd" is not in the vendor master; the closest matches are Globex Logistics Ltd (V003), Globax Logistics Ltd (V006). Confirm the vendor before this invoice is processed.');
+  });
+
+  await t.test("B3: a non-invoice with a near-miss vendor name is not held for it (the non-invoice branch comes first)", () => {
+    for (const type of ["statement", "receipt", "other", "credit_note"] as const) {
+      const r = vendorCheck(seededSnapshot(), ex({ document_type: type, vendor_name: "Glovex Logistics Ltd" }));
+      t.eq([r.status, r.severity], ["warn", "info"], type);
+      t.includes(r.reason, "not routed to onboarding");
+    }
+  });
+
+  await t.test("B3: each closeVendorMatches guard is observable (6-character minimum, 80-character cap, 12-character threshold, 2-edit ceiling, one entry per vendor, misread suffix)", () => {
+    const mk = (id: string, name: string, aliases: string[] = []): Vendor => ({ id, name, aliases, approved: true, bank_account: null, phone_on_file: null });
+    const ids = (name: string, vendors: Vendor[]) => closeVendorMatches(name, vendors).map((v) => v.id);
+    const globex = mk("A", "Globex Logistics Ltd", ["Globex"]);
+    t.eq(ids("Globe", [globex]), [], "5 characters, one edit from the alias Globex: never compared");
+    t.eq(ids("Globes", [globex]), ["A"], "the same edit at 6 characters is compared");
+    const x80 = "x".repeat(80);
+    t.eq(ids(`${x80}y`, [mk("A", x80)]), [], "an 81-character printed name is not compared");
+    t.eq(ids(x80, [mk("A", `${x80}y`)]), [], "an 81-character vendor name is not compared");
+    t.eq(ids(`${x80.slice(1)}y`, [mk("A", x80)]), ["A"], "80 characters, one edit: compared");
+    t.eq(ids("abcdefghixx", [mk("A", "abcdefghijk")]), [], "11 characters, 2 edits: too far");
+    t.eq(ids("abcdefghijx", [mk("A", "abcdefghijk")]), ["A"], "11 characters, 1 edit");
+    t.eq(ids("abcdefghixxl", [mk("A", "abcdefghijkl")]), ["A"], "12 characters, 2 edits");
+    t.eq(ids("abcdefgxxxkl", [mk("A", "abcdefghijkl")]), [], "12 characters, 3 edits: too far");
+    t.eq(ids("Glovex Logistics Ltd", [mk("A", "Globex Logistics Ltd", ["Globex Logistic"])]), ["A"], "a vendor whose name and alias are both near is listed once");
+    t.eq(ids("Initech Facilities Cc.", [mk("A", "Initech Facilities Co.")]), [], "a misread legal suffix is not repaired by the suffix stripping (known limit, ASSUMPTIONS.md)");
   });
 
   await t.test("checkVendor: a vendor that is not approved -> reject, route to onboarding (the vendor is still returned)", () => {
@@ -988,6 +1029,51 @@ export async function run(t: Check): Promise<void> {
     t.eq(notice.action, "Call the vendor on +1 415 555 0102 to verify new bank details before any payment.");
     const clean = await runStages(snap, ex());
     t.eq(clean.result.decision, "APPROVE", "no signal: the happy path still approves");
+  });
+
+  await t.test("B2: an unapproved vendor with a bank-change notice still rejects (the notice never turns a reject into a hold)", () => {
+    const r = vendorCheck(seededSnapshot(), ex({ vendor_name: "Umbrella Consulting", bank_account: "ACC-99-0000", document_signals: { ...NO_SIGNALS, bank_change_notice: true } }));
+    t.eq([r.status, r.severity], ["fail", "reject"]);
+    t.includes(r.reason, "onboarding");
+  });
+
+  await t.test("B2: a bank-change notice with no account printed, or none on file, still holds on the notice", () => {
+    const noneOnInvoice = vendorCheck(seededSnapshot(), ex({ bank_account: null, document_signals: { ...NO_SIGNALS, bank_change_notice: true } }));
+    t.eq([noneOnInvoice.status, noneOnInvoice.severity, noneOnInvoice.bankMismatch], ["fail", "hold", false]);
+    t.includes(noneOnInvoice.reason, "announces new or changed bank details");
+    const noneOnFile = seededSnapshot();
+    vendorOf(noneOnFile, "V002").bank_account = null;
+    const neither = vendorCheck(noneOnFile, ex({ bank_account: null, document_signals: { ...NO_SIGNALS, bank_change_notice: true } }));
+    t.eq([neither.status, neither.severity, neither.bankMismatch], ["fail", "hold", false]);
+    t.includes(neither.reason, "announces new or changed bank details");
+  });
+
+  await t.test("B2 (pipeline): the plan's motivating case, a scanned invoice with an amount corrected by hand, holds instead of approving", async () => {
+    const snap = seededSnapshot();
+    const scan = { grounding: null } as const; // a scan has no text layer to ground the values against
+    const clean = await runStages(snap, ex(), scan);
+    t.eq(clean.result.decision, "APPROVE", `without the flag the same scan approves: ${JSON.stringify(clean.result.reasons)}`);
+    const edited = await runStages(snap, ex({ document_signals: { ...NO_SIGNALS, handwritten_changes: true } }), scan);
+    t.eq(edited.result.decision, "HOLD");
+    t.includes(edited.steps.validate?.reason, "handwritten changes");
+    t.eq(edited.action, "Call the vendor on +1 415 555 0102 (number on file) to confirm the handwritten changes before any payment.");
+  });
+
+  await t.test("B2 (pipeline): with no phone on file the advice for a notice and for handwritten changes names procurement", async () => {
+    const snap = seededSnapshot();
+    vendorOf(snap, "V002").phone_on_file = null;
+    const hand = await runStages(snap, ex({ document_signals: { ...NO_SIGNALS, handwritten_changes: true } }));
+    t.eq(hand.action, "Confirm the handwritten changes with the vendor, using a number from procurement records, before any payment.");
+    const notice = await runStages(snap, ex({ document_signals: { ...NO_SIGNALS, bank_change_notice: true } }));
+    t.eq(notice.action, "Verify the new bank details with the vendor, using a number from procurement records (none is on file), before any payment.");
+  });
+
+  await t.test("B2: signal problems are filed under the document_signals field key, one per flag (the run page marks that row)", () => {
+    const r = checkValidate(ex({ document_signals: { ...NO_SIGNALS, multiple_documents: true, handwritten_changes: true } }), allGrounded(ex()), FIXED_NOW);
+    const byField = r.detail?.field_problems as Record<string, string[]>;
+    t.eq(Object.keys(byField), ["document_signals"]);
+    t.eq(byField.document_signals.length, 2);
+    t.eq(r.detail?.problem_kinds, ["signal"]);
   });
 
   await t.test("checkVendor: no readable vendor name or an ambiguous name is a hold (not a reject): nobody knows the vendor is unknown", () => {
@@ -1769,7 +1855,7 @@ export async function run(t: Check): Promise<void> {
     t.includes(nextAction("REJECT", { ingest: { ...stepOf("fail", "reject"), detail: { run_id: "abc" } } }, emptyCtx()), "same file was already handled");
   });
 
-  await t.test("nextAction: priority security -> duplicate -> vendor -> bank -> extraction -> document type -> PO -> amounts (every problem alone and with all the lower ones)", () => {
+  await t.test("nextAction: priority security -> duplicate -> vendor -> bank -> signals (B2) -> extraction -> document type -> PO -> amounts (every problem alone and with all the lower ones)", () => {
     const snap = seededSnapshot();
     const v2 = vendorOf(snap, "V002");
     interface Problem {
@@ -1807,12 +1893,29 @@ export async function run(t: Check): Promise<void> {
         },
         text: "+1 415 555 0102",
       },
+      {
+        name: "multiple documents (B2)",
+        apply: (s, c) => {
+          s.validate = stepOf("fail", "hold", "The file appears to hold more than one document");
+          c.extraction = ex({ document_signals: { ...NO_SIGNALS, multiple_documents: true } });
+        },
+        text: "Split the file",
+      },
+      {
+        name: "handwritten changes (B2)",
+        apply: (s, c) => {
+          s.validate = stepOf("fail", "hold", "The document has handwritten changes");
+          const base = c.extraction ?? ex();
+          c.extraction = { ...base, document_signals: { ...base.document_signals, handwritten_changes: true } };
+        },
+        text: "confirm the handwritten changes",
+      },
       { name: "extraction", apply: (s) => void (s.extract = stepOf("error", undefined, "Could not read invoice")), text: "Manual data entry required" },
       {
         name: "document type",
         apply: (s, c) => {
           s.validate = stepOf("fail", "hold", "not an invoice");
-          c.extraction = ex({ document_type: "statement" });
+          c.extraction = { ...(c.extraction ?? ex()), document_type: "statement" };
         },
         text: "statement handling",
       },

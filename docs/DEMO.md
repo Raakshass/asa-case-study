@@ -98,7 +98,7 @@ That is about 4.5 minutes plus the model's time. If the model is slow, keep step
 ## 5. Likely questions, short answers
 
 **1. Why doesn't the LLM make the decision?**
-Because finance needs the same answer every time and a reason it can audit. The decision is plain TypeScript (`src/lib/rules.ts`) with thresholds in one config file (2% tolerance, 7-day duplicate window, 0.75 confidence), and 211 checks run the truth data of all 10 samples through it. It also contains prompt injection: the worst a fooled model can do is misread, and misreads are caught by the checks after it.
+Because finance needs the same answer every time and a reason it can audit. The decision is plain TypeScript (`src/lib/rules.ts`) with thresholds in one config file (2% tolerance, 7-day duplicate window, 0.75 confidence), and 232 checks run the truth data of all 10 samples through it. It also contains prompt injection: the worst a fooled model can do is misread, and misreads are caught by the checks after it.
 
 **2. What happens if the model is fooled?**
 Shown with the "fooled" mock on sample 9 (the model returns PO-1003, a total of 400 and every confidence at 1.0). Four stages hold it independently: the security screen (instruction text and hidden text), the extract stage if the model still reports the text, validate ("The subtotal plus tax comes to $4,620.00 but the total is $400.00", "Extracted PO reference PO-1003 does not appear in the document; possible manipulation or misread", the same for the total), and amounts vs PO (the billed line is not on PO-1003). On top of that, a security-flagged run can never be approved.
@@ -125,4 +125,4 @@ Sample 5: the model reads the image (Gemini takes PDFs natively according to Ope
 Some patterns are broad ("override", "system:", "assistant:"), so an ordinary invoice can be held for review. That costs a manual review, never a payment or a rejection. The trade-off is listed in ASSUMPTIONS.md.
 
 **10. How do you know it works?**
-211 rule and guardrail checks on the real samples, 99 tests of the extraction code against a fake OpenRouter, 79 API tests, a 49-check HTTP smoke test and a 57-check real-browser test against the production build (also in a by-hand replay of the Docker image's layout on Node 22), and 18 static checks of the client bundle. All pass on the final code. What they cannot prove is how a real model reads these invoices: that is the eval run.
+232 rule and guardrail checks on the real samples, 100 tests of the extraction code against a fake OpenRouter, 79 API tests, a 49-check HTTP smoke test and a 57-check real-browser test against the production build (also in a by-hand replay of the Docker image's layout on Node 22), and 18 static checks of the client bundle. All pass on the final code. What they cannot prove is how a real model reads these invoices: that is the eval run.
