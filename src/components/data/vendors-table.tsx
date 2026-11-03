@@ -1,7 +1,7 @@
 import { CircleCheck, CircleX } from "lucide-react";
 import { cn } from "cn";
 import { TableFrame } from "@/components/shared/table-frame";
-import { SOFT_TONE } from "@/components/shared/tones";
+import { INK_TONE } from "@/components/shared/tones";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { MasterVendor } from "@/lib/types";
 import { accountTail } from "./data-format";
@@ -12,12 +12,9 @@ function ApprovedBadge({ approved }: { approved: boolean }) {
   return (
     <span
       data-approved={approved}
-      className={cn(
-        "inline-flex h-6 w-fit items-center gap-1.5 rounded-full border px-2.5 text-xs font-semibold whitespace-nowrap",
-        approved ? SOFT_TONE.approve : SOFT_TONE.reject,
-      )}
+      className={cn("inline-flex w-fit items-center gap-1.5 text-sm font-semibold whitespace-nowrap", approved ? INK_TONE.approve : INK_TONE.reject)}
     >
-      <Icon aria-hidden="true" className="size-3.5" />
+      <Icon aria-hidden="true" className="size-4" />
       {approved ? "Approved" : "Not approved"}
     </span>
   );
@@ -49,7 +46,7 @@ export function VendorsTable({ vendors }: VendorsTableProps) {
   return (
     <TableFrame label="Vendors">
       <TableHeader>
-        <TableRow className="bg-muted/50 hover:bg-muted/50">
+        <TableRow className="hover:bg-transparent">
           <TableHead scope="col" className="px-3">
             Vendor
           </TableHead>

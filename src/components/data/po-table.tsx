@@ -1,17 +1,16 @@
 import { Lock, TriangleAlert } from "lucide-react";
 import { Money } from "@/components/shared/money";
-import { ProgressBar } from "@/components/shared/progress-bar";
 import { TableFrame } from "@/components/shared/table-frame";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { formatUsd } from "@/lib/format";
 import type { MasterPo } from "@/lib/types";
 import { describeLines, poUsage, summarizeInvoices, type PoUsage } from "./data-format";
+import { PoUsageBar } from "./po-usage-bar";
 
 /** Marks a PO that no longer accepts invoices (its status is closed). */
 function ClosedTag() {
   return (
-    <span className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-border bg-muted px-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-      <Lock aria-hidden="true" className="size-3" />
+    <span className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-muted-foreground">
+      <Lock aria-hidden="true" className="size-3.5" />
       Closed
     </span>
   );
@@ -39,8 +38,8 @@ function RemainingCell({ po, usage }: { po: MasterPo; usage: PoUsage }) {
       ) : (
         <Money value={po.remaining} className={closed ? "text-muted-foreground" : "font-semibold"} />
       )}
-      {usage.state === "full" ? <span className="text-xs text-muted-foreground">fully used</span> : null}
-      {closed ? <span className="text-xs text-muted-foreground">closed to new invoices</span> : null}
+      {usage.state === "full" ? <span className="text-sm text-muted-foreground">fully used</span> : null}
+      {closed ? <span className="text-sm text-muted-foreground">closed to new invoices</span> : null}
     </div>
   );
 }
@@ -54,10 +53,10 @@ function PoRow({ po }: { po: MasterPo }) {
       <TableCell className="px-3 py-3">
         <div className="flex flex-col gap-0.5">
           <div className="flex items-center gap-2">
-            <span className="font-semibold text-foreground">{po.po_number}</span>
+            <span className="font-mono font-semibold text-foreground">{po.po_number}</span>
             {closed ? <ClosedTag /> : null}
           </div>
-          <span className="block max-w-[18rem] truncate text-xs text-muted-foreground" title={lines}>
+          <span className="block max-w-[18rem] truncate text-sm text-muted-foreground" title={lines}>
             {lines}
           </span>
           {/* Below 1024 px the Remaining column is off the edge of the table's scroll frame: repeat it here (UI-1). */}
@@ -73,14 +72,14 @@ function PoRow({ po }: { po: MasterPo }) {
             ) : (
               <Money value={po.remaining} className={closed ? "text-muted-foreground" : "font-semibold text-foreground"} />
             )}
-            {usage.state === "full" ? <span className="text-xs text-muted-foreground">(fully used)</span> : null}
+            {usage.state === "full" ? <span className="text-sm text-muted-foreground">(fully used)</span> : null}
           </span>
         </div>
       </TableCell>
       <TableCell className="px-3 py-3">
         <div className="flex flex-col gap-0.5">
           <span>{po.vendor_name ?? "Unknown vendor"}</span>
-          <span className="text-xs text-muted-foreground tabular-nums">{po.vendor_id}</span>
+          <span className="font-mono text-sm text-muted-foreground">{po.vendor_id}</span>
         </div>
       </TableCell>
       <TableCell className="px-3 py-3 text-right">
@@ -89,7 +88,7 @@ function PoRow({ po }: { po: MasterPo }) {
       <TableCell className="px-3 py-3 text-right">
         <div className="flex flex-col items-end gap-0.5">
           <Money value={po.invoiced} />
-          <span className="block max-w-[14rem] truncate text-xs text-muted-foreground" title={summarizeInvoices(po.approved_invoices, 99)}>
+          <span className="block max-w-[14rem] truncate text-sm text-muted-foreground" title={summarizeInvoices(po.approved_invoices, 99)}>
             {summarizeInvoices(po.approved_invoices)}
           </span>
         </div>
@@ -98,16 +97,7 @@ function PoRow({ po }: { po: MasterPo }) {
         <RemainingCell po={po} usage={usage} />
       </TableCell>
       <TableCell className="px-3 py-3">
-        <div className="flex min-w-32 flex-col gap-1.5">
-          <ProgressBar
-            value={po.invoiced}
-            max={po.subtotal}
-            label={`${po.po_number} used`}
-            valueText={`${formatUsd(po.invoiced)} of ${formatUsd(po.subtotal)} invoiced, ${usage.percent}% used`}
-            tone={usage.tone}
-          />
-          <span className="text-xs text-muted-foreground tabular-nums">{usage.percent}% used</span>
-        </div>
+        <PoUsageBar po={po} />
       </TableCell>
     </TableRow>
   );
@@ -119,14 +109,14 @@ export interface PoTableProps {
 
 /**
  * The purchase orders: PO number (with its lines), vendor, total, invoiced so far (with the approving invoice
- * numbers), REMAINING and a progress bar. Scrolls inside its own frame on a narrow screen; below 1024 px the remaining
+ * numbers), REMAINING and a bar split by the approving invoices. Scrolls inside its own frame on a narrow screen; below 1024 px the remaining
  * balance is repeated under the PO number, so a phone shows it without scrolling the table. Server-safe.
  */
 export function PoTable({ purchaseOrders }: PoTableProps) {
   return (
     <TableFrame label="Purchase orders">
       <TableHeader>
-        <TableRow className="bg-muted/50 hover:bg-muted/50">
+        <TableRow className="hover:bg-transparent">
           <TableHead scope="col" className="px-3">
             PO
           </TableHead>

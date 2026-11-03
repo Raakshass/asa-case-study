@@ -18,7 +18,7 @@ function Section({ id, title, count, description, children }: { id: string; titl
   return (
     <section aria-labelledby={id} className="space-y-3">
       <div className="space-y-1">
-        <h2 id={id} className="flex flex-wrap items-baseline gap-x-3 text-lg font-semibold tracking-tight">
+        <h2 id={id} className="flex flex-wrap items-baseline gap-x-3 text-xl font-semibold tracking-tight">
           {title}{" "}
           <span className="text-sm font-normal text-muted-foreground">{count}</span>
         </h2>
