@@ -113,7 +113,7 @@ Not measured yet: there was no API key during the build. The app records OpenRou
 Today it is one process, one SQLite file and one queue that handles invoices one at a time; that queue is what stops two invoices from spending the same PO balance. To scale: Postgres and a durable job queue, locking per PO or per vendor instead of globally, a stateless web tier with extraction workers, and object storage for the PDFs. The rules do not change. On Railway a service with a volume cannot have replicas, so SQLite is the ceiling of this design.
 
 **6. What is not built?**
-User accounts and roles; a human override on held invoices (approve or reject with a comment, as a new audit row); email and ERP integration; currencies other than USD and tax rates other than 10%; a Content-Security-Policy header; tests in browsers other than Chromium; and a live evaluation of the models.
+User accounts and roles; a human override on held invoices (approve or reject with a comment, as a new audit row); email and ERP integration; currencies other than USD and tax rates other than 10%; a nonce-based Content-Security-Policy (the current one allows inline scripts); tests in browsers other than Chromium; and a live evaluation of the models.
 
 **7. What does the model see?**
 The PDF (always named "invoice.pdf", never the uploaded name) and the system prompt, which tells it the document is untrusted. It never sees the rules, the vendor master or the balances. The PO suggestion sees only the invoice lines and the candidate POs' numbers and lines, and can only answer one of those numbers or "none" (the code checks the answer again, and the run is held either way).

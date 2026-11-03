@@ -409,7 +409,7 @@ async function sectionHeaders(): Promise<void> {
     ["/api/runs", { method: "POST", body: "{not json", headers: { "content-type": "application/json" } }],
   ];
   for (const [p, init] of paths) {
-    await check(S, `${init.method ?? "GET"} ${p.replace(hash, "<hash>")}: baseline security headers, no X-Powered-By`, async () => {
+    await check(S, `${init.method ?? "GET"} ${p.replace(hash, "<hash>")}: baseline security headers, a CSP (none on the PDF response), no X-Powered-By`, async () => {
       const res = await http(p, { ip: IP.headers, method: init.method, body: init.body, headers: init.headers });
       ok(res.status < 500 || p === "/", `answered ${res.status}`);
       eq(res.headers.get("x-content-type-options"), "nosniff", "X-Content-Type-Options");
@@ -418,7 +418,14 @@ async function sectionHeaders(): Promise<void> {
       const permissions = res.headers.get("permissions-policy") ?? "";
       for (const feature of ["camera=()", "microphone=()", "geolocation=()"]) includes(permissions, feature, "Permissions-Policy");
       eq(res.headers.get("x-powered-by"), null, "X-Powered-By");
-      ok(res.headers.get("content-security-policy") === null, "no CSP yet");
+      const csp = res.headers.get("content-security-policy");
+      if (p.startsWith("/api/files/")) ok(csp === null, "no CSP on the PDF response itself (it can stop Chrome's built-in viewer)");
+      else {
+        ok(csp !== null, "a Content-Security-Policy is sent (review round B7)");
+        for (const directive of ["default-src 'self'", "frame-src 'self'", "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'self'"]) {
+          includes(csp, directive, "Content-Security-Policy");
+        }
+      }
       if (p.startsWith("/api/") && !p.startsWith("/api/files/") && res.status !== 404) {
         eq(res.headers.get("cache-control"), "no-store", "Cache-Control on JSON");
       }

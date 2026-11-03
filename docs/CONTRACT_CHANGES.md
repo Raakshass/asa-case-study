@@ -198,3 +198,10 @@ Entry format:
 - Tests: `scripts/test-extract.ts` +3 (abort during a 429 wait: one request, no retry, no fallback; abort while a request is stalled: two requests, the stalled one cut at the abort, the cost of the answer that did arrive kept; an already aborted signal: no request); `scripts/test-api.ts`: the existing RT-PIPE-04 test also asserts that the extractor got a signal and that it was aborted at the deadline.
 - Why: review plan task B6.
 - Affects: nobody has to adapt (`signal` is optional). A held-by-timeout run stops spending credit.
+
+## 2026-11-03 review round B7 - next.config.mjs and scripts/smoke-http.ts (HTTP response headers; no type or API shape changed)
+- Before: every route sent four baseline headers (nosniff, no-referrer, SAMEORIGIN, a Permissions-Policy) and no Content-Security-Policy; Next's image optimizer answered `/_next/image` although the app uses no `next/image`.
+- After: production builds also send a `Content-Security-Policy` on every route except `/api/files/*` (directives in ASSUMPTIONS.md, review round B7); `images.unoptimized` is true, so `/_next/image` answers 404.
+- Tests: `scripts/smoke-http.ts`: the existing per-route header check now asserts a CSP with `default-src`, `frame-src`, `object-src 'none'`, `base-uri`, `form-action` and `frame-ancestors` on every path except `/api/files/*`, where it asserts there is none (it asserted "no CSP yet" for all of them).
+- Why: review plan task B7.
+- Affects: a page that needs an external script, style, font, image or connection would now be blocked (none does today); the PDF frame is unaffected on the PDF response itself.
