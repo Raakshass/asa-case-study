@@ -751,9 +751,12 @@ export async function checkPoMatch(
       extra: { problem: "no_amount" },
     });
   }
-  const candidates = snapshot.pos.filter(
-    (po) => po.vendor_id === vendor.id && po.status === "open" && remainingBalance(po, snapshot.invoices) >= wanted.amount,
-  );
+  const candidates = snapshot.pos.filter((po) => {
+    if (po.vendor_id !== vendor.id || po.status !== "open") return false;
+    const remaining = remainingBalance(po, snapshot.invoices);
+    const over = round2(wanted.amount - remaining);
+    return over <= 0 || withinTolerance(over, remaining); // the same 2% as a printed PO (review round B5)
+  });
   const numbers = candidates.map((po) => po.po_number);
   const list = numbers.join(", ");
   const extra = { problem: "inferred", amount: wanted.amount };
@@ -777,7 +780,7 @@ export async function checkPoMatch(
 
   if (candidates.length === 1) {
     const only = candidates[0];
-    return accept(only, `PO inferred as ${only.po_number} (the only open PO for ${vendor.name} with at least ${money(wanted.amount)} remaining), needs confirmation.`, {});
+    return accept(only, `PO inferred as ${only.po_number} (the only open PO for ${vendor.name} that can cover ${money(wanted.amount)} within the ${pctLabel(CONFIG.priceTolerancePct)} tolerance), needs confirmation.`, {});
   }
 
   let suggestion: SuggestPoResult;

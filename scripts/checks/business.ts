@@ -1194,6 +1194,44 @@ export async function run(t: Check): Promise<void> {
     t.eq(r.suggestion?.ok, true);
   });
 
+  await t.test("B5: the inferred-PO search accepts the same 2% over the remaining balance as a printed PO", async () => {
+    const initech = (amount: number) =>
+      ex({
+        vendor_name: "Initech Facilities Co.",
+        bank_account: "ACC-12-3456",
+        po_reference: null,
+        line_items: [{ description: "HVAC maintenance - 2 visits", quantity: 2, unit_price: amount / 2, amount }],
+        subtotal: amount,
+        tax: 0,
+        total: amount,
+      });
+    // PO-1005 has 3,000.00 left (PO-1004 has 6,000.00): 3,050 is 1.7% over PO-1005, 3,100 is 3.3% over.
+    const within = fakeSuggest();
+    const r1 = await matchPo(seededSnapshot(), initech(3050), within.fn);
+    t.eq(within.calls[0].candidates.map((c) => c.po_number), ["PO-1004", "PO-1005"], "1.7% over still makes PO-1005 a candidate");
+    t.eq(r1.candidates, ["PO-1004", "PO-1005"]);
+    const beyond = fakeSuggest();
+    const r2 = await matchPo(seededSnapshot(), initech(3100), beyond.fn);
+    t.eq(r2.candidates, ["PO-1004"], "3.3% over is not a candidate");
+    t.eq(beyond.calls.length, 0, "one candidate needs no model");
+    t.eq([r2.po?.po_number, r2.inferred], ["PO-1004", true]);
+    // exactly 2% over passes (2% of 3,000.00 is 60.00), one cent more does not
+    const edge = await matchPo(seededSnapshot(), initech(3060), fakeSuggest().fn);
+    t.eq(edge.candidates, ["PO-1004", "PO-1005"], "exactly 2% over is inside the tolerance");
+    const past = await matchPo(seededSnapshot(), initech(3060.01), fakeSuggest().fn);
+    t.eq(past.candidates, ["PO-1004"], "one cent past 2%");
+  });
+
+  await t.test("B5: the single-candidate sentence names the tolerance", async () => {
+    // Globex: PO-1003 has 6,000.00 left, PO-1008 4,200.00. A 6,100 invoice is 1.7% over PO-1003 and far over PO-1008.
+    const inv = ex({ vendor_name: "Globex Logistics Ltd", bank_account: "ACC-77-8899", po_reference: null, line_items: [{ description: "Freight", quantity: 1, unit_price: 6100, amount: 6100 }], subtotal: 6100, tax: 0, total: 6100 });
+    const r = await matchPo(seededSnapshot(), inv);
+    t.eq([r.status, r.severity, r.po?.po_number, r.inferred, r.candidates], ["warn", "hold", "PO-1003", true, ["PO-1003"]]);
+    t.eq(r.reason, "PO inferred as PO-1003 (the only open PO for Globex Logistics Ltd that can cover $6,100.00 within the 2% tolerance), needs confirmation.");
+    const roomy = await matchPo(seededSnapshot(), consulting(1000, { po_reference: null }));
+    t.eq(roomy.reason, "PO inferred as PO-1002 (the only open PO for Northwind IT Solutions LLC that can cover $1,000.00 within the 2% tolerance), needs confirmation.");
+  });
+
   await t.test("checkPoMatch: candidates exclude POs of other vendors, closed POs and POs without enough balance", async () => {
     const spy = fakeSuggest();
     // Acme: PO-1001 has 0 left, PO-1006 4,400, PO-1007 2,900. A 3,000 invoice fits PO-1006 only.
