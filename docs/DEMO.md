@@ -13,7 +13,7 @@ For the owner presenting the Invoice AP Agent. Labels in **bold** are the exact 
 - [ ] **Model comparison exists**: `docs/eval-extract.md` was produced with `npm run eval -- --out` (the "why this model" answer needs it).
 - [ ] **Reset**: **New run** → **Demo tools** → **Reset demo data** → paste the token → **Confirm reset**. Expect **Demo data reset** with Vendors 5, Purchase orders 8, Invoices 4, Runs 4.
 - [ ] **One test run**: on **New run**, the **Happy path** card → **Run this sample**. Expect APPROVE, the decision card's **Model** naming the real model (not "mock"), **Cost** above $0.00. Note the **Took** time: that is how long each sample will take on stage.
-- [ ] **Reset again.** Otherwise the happy path is rejected in the demo as "Exact same file already processed".
+- [ ] **Reset again.** Otherwise the happy path is rejected in the demo as "Exact same file already processed". (A sample card that has already run says so under it, "Ran <time>: <outcome>", with an **Open result** link, so you can see it before you press it.)
 - [ ] **Tabs open**: (1) `https://<your-domain>/` (Dashboard), (2) `https://<your-domain>/data` (Procurement data), (3) `https://<your-domain>/runs/new` (New run). Keep the reset token in a password manager, never on screen.
 - [ ] Browser zoom so the decision card and the first stages fit; notifications off.
 
@@ -87,7 +87,7 @@ That is about 4.5 minutes plus the model's time. If the model is slow, keep step
 
 **Reset refused.** "The reset was refused. The token is wrong, or reset is turned off on this server." Check `DEMO_RESET_ENABLED=true` and the token (at least 16 characters). A reset waits for the runs already queued to finish, so it can take a few seconds while a run is processing; with many runs queued it can take longer than the form waits (60 s), and the form then says **Still resetting** (the reset completes by itself on the server).
 
-**"Exact same file already processed in run ..."** You ran that sample since the last reset. Reset, or use it: "the first guard is the file's fingerprint".
+**"Exact same file already processed in run ..."** You ran that sample since the last reset (its card on **New run** said "Ran <time>: <outcome>" with an **Open result** link). Reset, or use it: "the first guard is the file's fingerprint".
 
 **"Too many runs were started in a short time"** The limit is 10 runs per minute per address and `MAX_RUNS_PER_HOUR` overall. Wait the time shown, or raise `MAX_RUNS_PER_HOUR` for the day. When too many uploads are in progress at once (2 per address, 16 in all) the page instead shows the server's own words with a 5-second wait: "Your address is already sending 2 files. Try again in 5 s." or "The server is receiving too many files at once. Try again in 5 s."
 
@@ -98,7 +98,7 @@ That is about 4.5 minutes plus the model's time. If the model is slow, keep step
 ## 5. Likely questions, short answers
 
 **1. Why doesn't the LLM make the decision?**
-Because finance needs the same answer every time and a reason it can audit. The decision is plain TypeScript (`src/lib/rules.ts`) with thresholds in one config file (2% tolerance, 7-day duplicate window, 0.75 confidence), and 232 checks run the truth data of all 10 samples through it. It also contains prompt injection: the worst a fooled model can do is misread, and misreads are caught by the checks after it.
+Because finance needs the same answer every time and a reason it can audit. The decision is plain TypeScript (`src/lib/rules.ts`) with thresholds in one config file (2% tolerance, 7-day duplicate window, 0.75 confidence), and 235 checks run the truth data of all 10 samples through it. It also contains prompt injection: the worst a fooled model can do is misread, and misreads are caught by the checks after it.
 
 **2. What happens if the model is fooled?**
 Shown with the "fooled" mock on sample 9 (the model returns PO-1003, a total of 400 and every confidence at 1.0). Four stages hold it independently: the security screen (instruction text and hidden text), the extract stage if the model still reports the text, validate ("The subtotal plus tax comes to $4,620.00 but the total is $400.00", "Extracted PO reference PO-1003 does not appear in the document; possible manipulation or misread", the same for the total), and amounts vs PO (the billed line is not on PO-1003). On top of that, a security-flagged run can never be approved.
@@ -125,4 +125,4 @@ Sample 5: the model reads the image (Gemini takes PDFs natively according to Ope
 Some patterns are broad ("override", "system:", "assistant:"), so an ordinary invoice can be held for review. That costs a manual review, never a payment or a rejection. The trade-off is listed in ASSUMPTIONS.md.
 
 **10. How do you know it works?**
-232 rule and guardrail checks on the real samples, 100 tests of the extraction code against a fake OpenRouter, 79 API tests, a 49-check HTTP smoke test and a 57-check real-browser test against the production build (also in a by-hand replay of the Docker image's layout on Node 22), and 18 static checks of the client bundle. All pass on the final code. What they cannot prove is how a real model reads these invoices: that is the eval run.
+235 rule and guardrail checks on the real samples, 103 tests of the extraction code against a fake OpenRouter, 80 API tests, a 49-check HTTP smoke test and a 58-check real-browser test against the production build (also in a by-hand replay of the Docker image's layout on Node 22), and 18 static checks of the client bundle. All pass on the final code. What they cannot prove is how a real model reads these invoices: that is the eval run.

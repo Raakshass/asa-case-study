@@ -433,6 +433,23 @@ async function sectionSamples(ctx: BrowserContext): Promise<void> {
       }
     });
   }
+  // Review round B8: after the click-through, every sample card says it already ran and links to its newest run.
+  await check("samples", "B8: a sample that has run shows \"Open result\" with a link to its newest run", async () => {
+    const newest = (results.get(PASSES) ?? []).find((r) => r.id === "01");
+    if (newest === undefined) return fail("the last pass did not finish sample 01");
+    const page = await newPage(ctx);
+    await page.goto(`${BASE}/runs/new`);
+    const note = page.locator('[data-sample-result="01-happy-northwind.pdf"]');
+    await note.waitFor();
+    const link = note.getByRole("link", { name: "Open result" });
+    eq(await link.getAttribute("href"), `/runs/${newest.runId}`, "Open result points at the newest run of sample 01");
+    ok(/^Ran .+: (Approved|On hold|Rejected)/.test(await note.innerText()), "the line says when it ran and what it decided");
+    const box = await link.boundingBox();
+    ok(box !== null && box.height >= 24, "the link is at least 24 px tall");
+    eq(await page.locator("[data-sample-result]").count(), 10, "all ten samples show a result line after the click-through");
+    eq(takeProblems(page), [], "browser console and network");
+    await page.close();
+  });
 }
 
 /** KPI figures the truth files predict after one click-through (history rows included). */
@@ -651,17 +668,23 @@ async function sectionKeyboard(page: Page): Promise<void> {
     const seen: string[] = [];
     const undrawn: string[] = [];
     const cards = new Set<string>();
-    for (let i = 0; i < 25; i++) {
+    // 25 stops were enough until review round B8: each sample that has run now adds an "Open result" link to the Tab order, so
+    // the loop runs for one full pass (it stops when Tab comes round to the first stop again) instead of a fixed count.
+    for (let i = 0; i < 60; i++) {
       await page.keyboard.press("Tab");
       await page.waitForTimeout(220); // buttons animate their ring in over 150 ms
       const f = await focusInfo(page);
-      seen.push(`${f.tag}:${f.text}`);
+      const entry = `${f.tag}:${f.text}`;
+      if (seen.length > 0 && entry === seen[0]) break;
+      seen.push(entry);
       if (f.sample !== null && f.tag === "button") cards.add(f.sample);
       if (f.tag !== "body" && (!f.visible || !f.drawn)) undrawn.push(`${f.tag} "${f.text}"`);
     }
     eq(undrawn, [], "focused elements without a visible focus indicator");
     ok(seen.some((x) => x.includes("Reset demo data")), `the reset toggle is reachable (${show(seen)})`);
     eq(cards.size, samples.length, "every sample card is a reachable <button>");
+    const resultLinks = await page.locator("[data-sample-result] a").count();
+    eq(seen.filter((x) => x === "a:Open result").length, resultLinks, "every 'Open result' link is reachable by Tab (its focus ring was checked with the rest above)");
     const fakeButtons = await page.locator('[role="button"]:not(button)').count();
     eq(fakeButtons, 0, "role=button on something that is not a <button>");
   });

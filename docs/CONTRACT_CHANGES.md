@@ -219,3 +219,10 @@ Entry format:
 - Tests: `scripts/checks/contracts.ts` +1 (for every seeded PO the breakdown adds up to `invoiced` and names the same invoices in the same order; PO-1003 is GLX-301 12,000 and GLX-302 12,000; a held and a rejected invoice are not listed, a missing subtotal counts the total, a missing number shows the id); the strict master schema in `scripts/test-api.ts` and the PO-1003 check in `scripts/smoke-http.ts` know the field.
 - Why: review plan task B10 (the Procurement data page's split bar, task U7, needs each invoice's share).
 - Affects: a client that validates `GET /api/master` with a strict schema must accept the new key; the UI shows nothing new until U7.
+
+## 2026-11-03 review round B8 - src/components/start/sample-grid.tsx and scripts/e2e-browser.ts (UI only; no HTTP or src/lib contract change)
+- Before: pressing a sample twice before a reset made a REJECT ("Exact same file already processed") with no warning on the start page.
+- After: `SampleSection` also loads `GET /api/runs?limit=200` once and keeps the newest non-history run of each sample file; a card whose sample has run shows, as a sibling of its button, `Ran <time>: <Approved | On hold | Rejected | not finished>` and an "Open result" link to `/runs/<id>` (`data-sample-result`, link `min-h-6` = 24 px). A failed list request shows nothing extra. "Run this sample" is unchanged.
+- Tests: `scripts/e2e-browser.ts` +1 at the end of the samples section (the link of sample 01 points at its newest run, the line names a decision, the link is at least 24 px tall, all ten samples show a result line after the click-through, no console or network problem). The start page's keyboard test ("Tab reaches the reset toggle and every sample card") pressed Tab a fixed 25 times, which the ten new links push past; it now walks one full pass (it stops when Tab comes round to the first stop) and also asserts that every "Open result" link is reachable.
+- Why: review plan task B8.
+- Affects: nobody (display only).

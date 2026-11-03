@@ -1,15 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { ArrowRight, LoaderCircle } from "lucide-react";
 import { cn } from "cn";
-import { getSamples, unwrap } from "@/components/shared/api";
-import { DecisionBadge } from "@/components/shared/decision-badge";
+import { formatWhen } from "@/components/dashboard/run-format";
+import { getRuns, getSamples, unwrap } from "@/components/shared/api";
+import { DECISION_META, DecisionBadge } from "@/components/shared/decision-badge";
 import { EmptyState } from "@/components/shared/empty-state";
 import { ErrorState } from "@/components/shared/error-state";
 import { CardSkeleton } from "@/components/shared/skeletons";
 import { usePoll } from "@/components/shared/use-poll";
-import type { SampleListItem } from "@/lib/types";
+import type { RunListItem, SampleListItem } from "@/lib/types";
 
 // grid-cols-1 is explicit (minmax(0, 1fr)) so one long unbroken word cannot widen the single column of a phone
 const GRID = "grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3";
@@ -106,6 +108,23 @@ function CardProblem({ title, message }: { title: string; message: string }) {
   );
 }
 
+/**
+ * "Ran Nov 3, 11:42 AM: Approved" and a link to that run, under a sample that already has a run (review round B8): pressing the
+ * same sample twice before a reset makes a REJECT ("Exact same file already processed"), which is correct but surprising.
+ * A sibling of the card's button, never inside it.
+ */
+function PriorResult({ file, run }: { file: string; run: RunListItem }) {
+  const when = formatWhen(run.created_at);
+  return (
+    <p className="flex flex-wrap items-center gap-x-2 text-sm text-muted-foreground" data-sample-result={file}>
+      <span>{`Ran ${when?.text ?? "earlier"}: ${run.decision ? DECISION_META[run.decision].outcome : "not finished"}`}</span>
+      <Link href={`/runs/${encodeURIComponent(run.id)}`} className="inline-flex min-h-6 items-center font-medium text-primary underline-offset-4 hover:underline">
+        Open result
+      </Link>
+    </p>
+  );
+}
+
 export interface SampleSectionProps {
   /** A run is being started (an upload or any sample): every card is switched off. */
   disabled: boolean;
@@ -124,6 +143,13 @@ export interface SampleSectionProps {
 export function SampleSection({ disabled, startingFile, onPick, problem = null }: SampleSectionProps) {
   const [retrying, setRetrying] = useState(false);
   const { data, error, loading, refresh } = usePoll((signal) => unwrap(getSamples(signal)), { intervalMs: 0 });
+  // The newest run of each sample file (the list is newest first), so a card can say it already ran. Loaded once; a failure just shows nothing.
+  const runs = usePoll((signal) => unwrap(getRuns({ limit: 200 }, signal)), { intervalMs: 0 });
+  const lastRun = new Map<string, RunListItem>();
+  for (const run of runs.data?.runs ?? []) {
+    if (run.is_history || run.file_name === null || lastRun.has(run.file_name)) continue;
+    lastRun.set(run.file_name, run);
+  }
 
   const retry = useCallback(() => {
     setRetrying(true);
@@ -165,6 +191,7 @@ export function SampleSection({ disabled, startingFile, onPick, problem = null }
       {data.map((sample) => (
         <li key={sample.file} className="flex flex-col gap-2">
           <SampleCard sample={sample} disabled={disabled} starting={startingFile === sample.file} onPick={onPick} />
+          {lastRun.has(sample.file) ? <PriorResult file={sample.file} run={lastRun.get(sample.file) as RunListItem} /> : null}
           {problem !== null && problem.file === sample.file ? <CardProblem title={problem.title} message={problem.message} /> : null}
         </li>
       ))}
