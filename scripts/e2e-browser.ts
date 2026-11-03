@@ -9,7 +9,9 @@
  *   SMOKE_RESET_TOKEN   the server's DEMO_RESET_TOKEN. Required: every click-through starts from a reset done in the UI.
  *   E2E_SHOTS           folder for the PNG screenshots (default <os tmp>/e2e-browser-shots)
  *   E2E_DATA_DIR        the server's DATA_DIR. Enables the "xss" section, which writes hostile rows straight into the
- *                       server's SQLite file (the repo's db helpers) and checks they render as plain text.
+ *                       server's SQLite file (the repo's db helpers) and checks they render as plain text, and the
+ *                       unhappy section's stored-file check, which deletes the stored copy of one upload of its own
+ *                       from <DATA_DIR>/uploads while the server runs.
  *   E2E_PASSES          full click-throughs of the 10 samples (default 2: the plan's "two clean runs in a row")
  *
  * Sections (default: all, in this order): reset, samples (E2E_PASSES passes, a reset before each), dashboard, data,
@@ -28,7 +30,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { type Browser, type BrowserContext, type Page, type Request as PwRequest, type Response as PwResponse, chromium } from "playwright";
+import { PDFDocument, StandardFonts } from "pdf-lib";
+import { type Browser, type BrowserContext, type Locator, type Page, type Request as PwRequest, type Response as PwResponse, chromium } from "playwright";
 import { type TruthSample, loadTruthSamples, samplePdfPath } from "../src/lib/samples";
 import { STAGES, STAGE_KEYS, type StageKey } from "../src/lib/types";
 
@@ -99,8 +102,8 @@ const nextIp = (): string => `198.18.${Math.floor(ipCounter / 250) % 250}.${(ipC
 /** Everything a page did wrong: console errors and warnings, uncaught errors, failed or 5xx requests. */
 interface Watch {
   problems: string[];
-  /** responses by path (for "the PDF frame loaded") */
-  responses: { url: string; status: number; type: string }[];
+  /** responses by path (for "the PDF frame loaded"; the method tells the frame's GET from the panel's HEAD probe) */
+  responses: { url: string; status: number; type: string; method: string }[];
   /** paths whose 4xx is expected in the current check */
   allow4xx: RegExp[];
 }
@@ -123,7 +126,7 @@ function watch(page: Page): Watch {
   page.on("response", (r: PwResponse) => {
     const url = new URL(r.url());
     if (url.origin !== new URL(BASE).origin) return;
-    w.responses.push({ url: url.pathname, status: r.status(), type: r.headers()["content-type"] ?? "" });
+    w.responses.push({ url: url.pathname, status: r.status(), type: r.headers()["content-type"] ?? "", method: r.request().method() });
     if (r.status() >= 500 || (r.status() >= 400 && !w.allow4xx.some((re) => re.test(url.pathname)))) {
       w.problems.push(`HTTP ${r.status()} for ${r.request().method()} ${url.pathname}`);
     }
@@ -226,6 +229,11 @@ async function resetViaUi(page: Page): Promise<void> {
 /** The decision card of a finished run (its heading is exactly "Decision"). */
 const decisionCard = (page: Page) => page.locator("section").filter({ has: page.locator("h2", { hasText: /^Decision$/ }) });
 
+/** A list in the decision card, by its heading (fix round UI-5: "Why it is on hold" / "Why it was rejected", "Also noted"). */
+const reasonList = (page: Page, card: Locator, heading: RegExp) => card.locator("section").filter({ has: page.locator("h3", { hasText: heading }) });
+const WHY_HEADING = /^Why it (is on hold|was rejected)$/;
+const NOTES_HEADING = /^Also noted$/;
+
 interface SampleResult {
   id: string;
   runId: string;
@@ -253,6 +261,44 @@ async function runSampleViaUi(page: Page, s: TruthSample, expectedStages: string
   for (const phrase of m.expectedReasonIncludes) has(cardText, phrase, `#${s.id} reason`);
   has(cardText, m.expectedNextActionIncludes, `#${s.id} next action`);
   if (m.expectedSecurityFlag) ok((await final.getByText("Security flag").count()) > 0, `#${s.id}: the shield badge is shown`);
+
+  // fix round UI-5: on a hold or a reject, a reason that only comes from a note (a warning with severity info, or a
+  // passed or skipped stage) is listed under "Also noted" and never under "Why it is ..."; every other reason is listed
+  // under "Why it is ..." (the reasons and the stages come from the API: what is stored is unchanged)
+  const flat = (t: string): string => t.replace(/\s+/g, " ").trim();
+  const whyBox = reasonList(page, final, WHY_HEADING);
+  const notesBox = reasonList(page, final, NOTES_HEADING);
+  if (m.expectedDecision !== "APPROVE") {
+    const api = (await (await page.request.get(`${BASE}/api/runs/${runId}`)).json()) as {
+      decision_reasons: string[];
+      security_flag: boolean;
+      steps: { key: string; status: string; severity: string | null; reason: string | null }[];
+    };
+    eq(await whyBox.count(), 1, `#${s.id} one list under "${m.expectedDecision === "HOLD" ? "Why it is on hold" : "Why it was rejected"}"`);
+    const why = flat(await whyBox.innerText());
+    const notes = (await notesBox.count()) > 0 ? flat(await notesBox.innerText()) : "";
+    const isNote = (st: { status: string; severity: string | null }) =>
+      (st.status === "warn" && (st.severity === "info" || st.severity === null)) || st.status === "pass" || st.status === "skipped";
+    // a flagged run's screen and extract reasons quote the hidden text; they are checked with fix round UI-6 below
+    const quoting = new Set(api.security_flag ? api.steps.filter((st) => st.key === "screen" || st.key === "extract").map((st) => st.reason) : []);
+    for (const reason of api.decision_reasons) {
+      const from = api.steps.filter((st) => st.key !== "decide" && st.reason === reason);
+      if (from.length > 0 && from.every(isNote)) {
+        ok(!why.toLowerCase().includes(flat(reason).toLowerCase()), `#${s.id} the note "${reason.slice(0, 60)}" is not listed under the 'Why' heading`);
+        has(notes, flat(reason), `#${s.id} the note is listed under 'Also noted'`);
+      } else if (!quoting.has(reason)) {
+        has(why, flat(reason), `#${s.id} the cause is listed under the 'Why' heading`);
+      }
+    }
+    if (m.render === "scanned") {
+      // the finding's own case (#5): "No text layer to verify against (scanned)" read as if scans were held
+      ok(!why.toLowerCase().includes("no text layer"), `#${s.id} the scan's note is not under 'Why it is on hold' (${why.slice(0, 160)})`);
+      has(why, "inferred", `#${s.id} the inferred PO is the cause`);
+      has(why, m.expectedPo?.po_number ?? "PO-", `#${s.id} the cause names the inferred PO`);
+      eq(await notesBox.count(), 1, `#${s.id} one list under "Also noted"`);
+      has(notes, "No text layer to verify against", `#${s.id} the scan's note is under 'Also noted'`);
+    }
+  }
 
   // the stepper: every stage's status, as the truth and the rehearsal expect
   const stages = page.locator("li[data-stage]");
@@ -294,6 +340,20 @@ async function runSampleViaUi(page: Page, s: TruthSample, expectedStages: string
     await banner.waitFor();
     const b = (await banner.innerText()).replace(/\s+/g, " ");
     has(b, m.hiddenText.replace(/\s+/g, " ").slice(0, 120), `#${s.id} hidden instruction quoted in the banner`);
+    // fix round UI-6: the card quoted the instruction four times (the banner, the scan's and the tiny-text check's
+    // quotes in the screen reason, the model's in the extract reason). It quotes it once, in the banner; the list of
+    // causes keeps what each check found, without the quote. The stages below keep every reason verbatim.
+    const phrase = flat(m.hiddenText).split(" ").slice(2, 6).join(" ").replace(/[.,;:]+$/, "");
+    ok(phrase.split(" ").length === 4 && b.toLowerCase().includes(phrase.toLowerCase()), `#${s.id} "${phrase}" is in the banner`);
+    const times = (hay: string) => hay.toLowerCase().split(phrase.toLowerCase()).length - 1;
+    eq(times(flat(await final.innerText())), 1, `#${s.id} times the decision card quotes "${phrase}"`);
+    eq(await whyBox.count(), 1, `#${s.id} one list under "Why it is on hold"`);
+    const why = flat(await whyBox.innerText());
+    eq(times(why), 0, `#${s.id} times the causes quote "${phrase}"`);
+    has(why, "suspicious", `#${s.id} the causes still say what the checks found`);
+    has(why, "quoted in the security banner above", `#${s.id} the causes point at the banner's quote`);
+    ok(!/\(\+\d+ more\)/.test(why), `#${s.id} the folded causes keep no "(+N more)" that counts from a quote they no longer show`);
+    has(flat(await page.locator('li[data-stage="screen"]').innerText()), phrase, `#${s.id} the screen stage keeps its reason verbatim`);
   }
 
   // the PDF frame points at the stored file and the file was served as a PDF
@@ -302,8 +362,9 @@ async function runSampleViaUi(page: Page, s: TruthSample, expectedStages: string
   const frame = page.locator(`iframe[src="/api/files/${hash}#navpanes=0&view=FitH"]`);
   eq(await frame.count(), 1, `#${s.id} PDF iframe on /api/files/<hash>#navpanes=0&view=FitH`);
   ok((await frame.getAttribute("title"))?.includes("Invoice PDF"), `#${s.id} the frame has a title`);
-  for (let i = 0; i < 50 && !watchOf(page).responses.some((r) => r.url === `/api/files/${hash}`); i++) await page.waitForTimeout(100);
-  const served = watchOf(page).responses.find((r) => r.url === `/api/files/${hash}`);
+  // (fix round UI-3: the panel first sends a HEAD to see whether the file is still stored; the frame's own GET is what counts)
+  for (let i = 0; i < 50 && !watchOf(page).responses.some((r) => r.url === `/api/files/${hash}` && r.method === "GET"); i++) await page.waitForTimeout(100);
+  const served = watchOf(page).responses.find((r) => r.url === `/api/files/${hash}` && r.method === "GET");
   ok(served !== undefined && served.status === 200 && served.type.includes("application/pdf"), `#${s.id} the PDF was served (${show(served)})`);
   // Chrome paints the PDF viewer of a frame only once it is on screen (#9's frame starts below the fold)
   await frame.scrollIntoViewIfNeeded();
@@ -430,6 +491,9 @@ async function sectionDashboard(page: Page): Promise<void> {
     await history.getByRole("link").click();
     await page.waitForURL(`${BASE}/runs/${id}`);
     await page.getByRole("heading", { name: "Processed before the demo", exact: true }).waitFor();
+    // the record's facts come from a second request, made once the first answer says the run is history: wait for the
+    // list they render in before reading the page (the heading alone appears one round trip earlier)
+    await page.locator('section[aria-labelledby="history-heading"] dl').waitFor();
     const text = await textOf(page);
     has(text, "Acme Office Supplies", "vendor of the record");
     has(text, "INV-0042", "invoice number of the record");
@@ -465,13 +529,16 @@ async function sectionNarrow(): Promise<void> {
   const page = await newPage(ctx);
   const runs = (await (await page.request.get(`${BASE}/api/runs?limit=200`)).json()) as { runs: { id: string; file_name: string | null }[] };
   const nine = runs.runs.find((r) => r.file_name === "09-prompt-injection.pdf");
-  const targets: [string, string][] = [
+  const five = runs.runs.find((r) => r.file_name === "05-scanned-no-po.pdf");
+  const targets: [string, string, string?][] = [
     ["dashboard", "/"],
     ["start page", "/runs/new"],
     ["run view (#9, the longest)", nine ? `/runs/${nine.id}` : "/runs/new"],
     ["data page", "/data"],
+    // fix round UI-5: the decision card's "Also noted" list (only #5 has one among the samples)
+    ["run view (#5, a cause and an 'Also noted' note)", five ? `/runs/${five.id}` : "/runs/new", "narrow-run-05"],
   ];
-  for (const [what, url] of targets) {
+  for (const [what, url, shotName] of targets) {
     await check("narrow", `375 px: ${what} has no horizontal page scroll, readable text, usable tap targets`, async () => {
       await page.goto(`${BASE}${url}`);
       await page.waitForLoadState("networkidle");
@@ -510,7 +577,7 @@ async function sectionNarrow(): Promise<void> {
       });
       ok(report.minFont >= 11, `smallest text is ${report.minFont}px ("${report.minFontText}")`);
       eq(report.small, [], "tap targets smaller than 24x24 px");
-      await shot(page, `narrow-${what.split(" ")[0]}${what.includes("run view") ? "-run" : ""}`);
+      await shot(page, shotName ?? `narrow-${what.split(" ")[0]}${what.includes("run view") ? "-run" : ""}`);
       eq(takeProblems(page), [], "browser console and network");
     });
   }
@@ -647,6 +714,9 @@ async function sectionKeyboard(page: Page): Promise<void> {
     ["data page", "/data"],
   ];
   if (nine) pages.push(["run view of #9, every stage open", `/runs/${nine.id}`]);
+  // fix round UI-5: the decision card with an "Also noted" list
+  const five = listed.runs.find((r) => r.file_name === "05-scanned-no-po.pdf");
+  if (five) pages.push(["run view of #5 (with an 'Also noted' list), every stage open", `/runs/${five.id}`]);
   for (const [what, url] of pages) {
     await check("keyboard", `axe-core: no WCAG A/AA violations on the ${what}`, async () => {
       await page.goto(`${BASE}${url}`);
@@ -790,6 +860,69 @@ async function sectionUnhappy(): Promise<void> {
       }
     });
   }
+  // fix round UI-3: when a run's stored PDF was gone, the panel framed /api/files/<hash> and the browser showed the
+  // API's JSON ({"error":"File not found."}). A PDF no other check uses is run, shown, then deleted from the server's
+  // DATA_DIR while the server runs, and the page is loaded again.
+  const goneName = "fix round UI-3: a run whose stored PDF was deleted says 'The stored file is no longer available' (no frame on the API's 404)";
+  if (DATA_DIR === "") {
+    skip("unhappy", goneName, "set E2E_DATA_DIR to the server's DATA_DIR to run this check");
+    return;
+  }
+  await check("unhappy", goneName, async () => {
+    const ip = nextIp();
+    const storedCtx = await newContext({ ip });
+    const freshCtx = await newContext({ ip }); // its own HTTP cache: it never loaded the file
+    try {
+      const p = await newPage(storedCtx);
+      const doc = await PDFDocument.create();
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      doc.addPage([595, 842]).drawText(`e2e stored-file check ${crypto.randomUUID()}`, { x: 56, y: 780, size: 12, font });
+      const bytes = Buffer.from(await doc.save());
+      const hash = crypto.createHash("sha256").update(bytes).digest("hex");
+      const res = await p.request.post(`${BASE}/api/runs`, { headers: { "x-forwarded-for": ip }, multipart: { file: { name: "stored-file-check.pdf", mimeType: "application/pdf", buffer: bytes } } });
+      eq(res.status(), 202, "the upload was accepted");
+      const { runId } = (await res.json()) as { runId: string };
+      let status = "";
+      for (let i = 0; i < 240 && status !== "done" && status !== "error"; i++) {
+        if (i > 0) await p.waitForTimeout(250);
+        status = ((await (await p.request.get(`${BASE}/api/runs/${runId}`)).json()) as { status: string }).status;
+      }
+      eq(status, "done", "the run finished");
+      // with the file stored: the frame
+      await p.goto(`${BASE}/runs/${runId}`);
+      await decisionCard(p).waitFor();
+      await p.locator(`iframe[src="/api/files/${hash}#navpanes=0&view=FitH"]`).waitFor();
+      eq(await p.getByText("The stored file is no longer available").count(), 0, "no 'no longer available' note while the file is stored");
+      const before = watchOf(p).responses.filter((r) => r.url === `/api/files/${hash}`).map((r) => `${r.method} ${r.status}`);
+      eq(takeProblems(p), [], "browser console and network (file stored)");
+      // the stored copy deleted while the server runs, then the run opened in a browser that never loaded it
+      const stored = path.join(DATA_DIR, "uploads", `${hash}.pdf`);
+      ok(fs.existsSync(stored), `the upload is stored in E2E_DATA_DIR (${stored})`);
+      fs.rmSync(stored);
+      const q = await newPage(freshCtx);
+      watchOf(q).allow4xx = [new RegExp(`^/api/files/${hash}$`)];
+      await q.goto(`${BASE}/runs/${runId}`);
+      await decisionCard(q).waitFor();
+      // the panel settles on the note, or (the defect) on a frame whose document is the API's JSON 404
+      const gone = q.getByText("The stored file is no longer available");
+      const frames = q.locator('iframe[src^="/api/files/"]');
+      for (let i = 0; i < 100 && (await gone.count()) === 0 && (await frames.count()) === 0; i++) await q.waitForTimeout(100);
+      await q.waitForTimeout(500);
+      eq(await frames.count(), 0, "frames on the deleted file (each shows the API's JSON 404)");
+      eq(await gone.count(), 1, "'The stored file is no longer available' notes");
+      eq(await q.getByRole("link", { name: /Open in a new tab/ }).count(), 0, "links to the deleted file");
+      ok(!(await textOf(q)).includes("File not found"), "the API's JSON error is not on the page");
+      // how: the panel asks with HEAD first and frames the file only when it is there
+      const after = watchOf(q).responses.filter((r) => r.url === `/api/files/${hash}`).map((r) => `${r.method} ${r.status}`);
+      eq(after, ["HEAD 404"], "requests for the deleted file");
+      ok(before.includes("HEAD 200") && before.includes("GET 200"), `with the file stored, the panel's HEAD found it and the frame loaded it (${show(before)})`);
+      await shot(q, "unhappy-stored-file-gone");
+      eq(takeProblems(q).filter((x) => !/status of 404/.test(x)), [], "browser console and network (the HEAD's own 404 aside)");
+    } finally {
+      await storedCtx.close();
+      await freshCtx.close();
+    }
+  });
 }
 
 /* ---- XSS: hostile rows written straight into the server's database ---- */

@@ -1,6 +1,6 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { ExternalLink, FileText, FileX } from "lucide-react";
 import { fileUrl } from "@/components/shared/api";
 import { Button } from "@/components/ui/button";
@@ -29,23 +29,58 @@ export interface PdfPanelProps {
 }
 
 /**
- * The invoice as the browser's own PDF viewer shows it (an iframe on /api/files/<hash>). The hash is only used
- * when it is a 64-character lowercase hex string (fileUrl), so no other address can reach the frame. A pre-loaded
- * history record keeps no file: it says so. On a touch screen the PDF is a button that opens it in its own tab.
- */
-/**
  * PDF open parameters for the browser's viewer: no thumbnail pane, page fitted to the width. Chrome otherwise opens a
  * framed PDF with its thumbnail sidebar, which leaves the invoice page about 240 px wide (routes-ui UI-4). A fragment
  * is never sent to the server, so the request is still exactly /api/files/<hash>.
  */
 const VIEWER_PARAMS = "#navpanes=0&view=FitH";
 
+/**
+ * Is the stored copy still on the server (routes-ui UI-3)? One HEAD request per file. Only a 404 means gone (the frame
+ * would show the API's JSON error); any other answer, a network error included, shows the PDF as before.
+ */
+function useStoredFile(file: string | null): "checking" | "found" | "gone" {
+  const [answer, setAnswer] = useState<{ file: string; gone: boolean } | null>(null);
+  useEffect(() => {
+    if (file === null) return;
+    const ctl = new AbortController();
+    fetch(file, { method: "HEAD", cache: "no-store", signal: ctl.signal })
+      .then((res) => setAnswer({ file, gone: res.status === 404 }))
+      .catch(() => {
+        if (!ctl.signal.aborted) setAnswer({ file, gone: false });
+      });
+    return () => ctl.abort();
+  }, [file]);
+  return answer === null || answer.file !== file ? "checking" : answer.gone ? "gone" : "found";
+}
+
+function NoFile({ title, text }: { title: string; text: string }) {
+  return (
+    <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
+      <span aria-hidden="true" className="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        <FileX className="size-6" />
+      </span>
+      <div className="space-y-1">
+        <p className="text-base font-medium">{title}</p>
+        <p className="mx-auto max-w-xs text-sm text-muted-foreground">{text}</p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The invoice as the browser's own PDF viewer shows it (an iframe on /api/files/<hash>). The hash is only used
+ * when it is a 64-character lowercase hex string (fileUrl), so no other address can reach the frame. A pre-loaded
+ * history record keeps no file: it says so. On a touch screen the PDF is a button that opens it in its own tab.
+ * The frame appears once a HEAD request has found the stored file; a run whose file was removed says so instead.
+ */
 export function PdfPanel({ run }: PdfPanelProps) {
   const touch = useSyncExternalStore(subscribe, isTouchPrimary, isTouchPrimaryOnServer);
   const file = fileUrl(run.file_hash);
   const url = file === null ? null : `${file}${VIEWER_PARAMS}`;
   const name = displayText(run.file_name, 100);
-  const embedded = url !== null && !touch;
+  const stored = useStoredFile(file);
+  const embedded = url !== null && !touch && stored === "found";
   return (
     <section aria-labelledby="pdf-heading" className="overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-4 py-3 sm:px-5">
@@ -71,13 +106,20 @@ export function PdfPanel({ run }: PdfPanelProps) {
           </a>
         ) : null}
       </div>
-      {embedded ? (
+      {stored === "gone" ? (
+        <NoFile
+          title="The stored file is no longer available"
+          text="The PDF of this run has been removed from the server, so it cannot be shown. The run's record is unchanged."
+        />
+      ) : embedded ? (
         <iframe
           src={url}
           title={name ? `Invoice PDF: ${name}` : "Invoice PDF"}
           referrerPolicy="no-referrer"
           className="block h-[34rem] w-full bg-muted sm:h-[38rem] lg:h-[44rem]"
         />
+      ) : url !== null && !touch ? (
+        <div aria-hidden="true" className="block h-[34rem] w-full bg-muted sm:h-[38rem] lg:h-[44rem]" />
       ) : url !== null ? (
         <div className="flex flex-col items-center gap-3 px-6 py-10 text-center">
           <span aria-hidden="true" className="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
@@ -95,17 +137,10 @@ export function PdfPanel({ run }: PdfPanelProps) {
           </Button>
         </div>
       ) : (
-        <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
-          <span aria-hidden="true" className="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
-            <FileX className="size-6" />
-          </span>
-          <div className="space-y-1">
-            <p className="text-base font-medium">No PDF stored</p>
-            <p className="mx-auto max-w-xs text-sm text-muted-foreground">
-              {run.is_history ? "Pre-loaded history records were processed before the demo and keep no file." : "No file is stored for this run."}
-            </p>
-          </div>
-        </div>
+        <NoFile
+          title="No PDF stored"
+          text={run.is_history ? "Pre-loaded history records were processed before the demo and keep no file." : "No file is stored for this run."}
+        />
       )}
     </section>
   );

@@ -10,6 +10,7 @@ import { SecurityBadge } from "@/components/shared/security-badge";
 import { EvidenceQuote, SecurityBanner } from "@/components/shared/security-banner";
 import { Button } from "@/components/ui/button";
 import type { Decision, RunDetail } from "@/lib/types";
+import { groupReasons } from "./decision-reasons";
 import {
   DETECTOR_LABEL,
   buildSecurityEvidence,
@@ -26,6 +27,8 @@ import {
 
 /** How many reasons are shown before the rest goes behind a button (plan section 9: 1 to 5 sentences). */
 const SHOWN_REASONS = 5;
+/** A reason is shown up to this many characters. */
+const REASON_CHARS = 1200;
 
 const ACCENT: Record<Decision, string> = {
   APPROVE: "border-t-approve-solid",
@@ -77,12 +80,18 @@ function RawFindings({ groups }: { groups: ReadonlyArray<{ title: string; quotes
   );
 }
 
-/** The shield banner of a security-flagged run, with what was found quoted once and which detectors caught it. */
-function SecurityPanel({ run }: { run: RunDetail }) {
+/** What the detectors of a flagged run reported (the screen's detail, the model's report) and the banner's merged quotes. */
+function securityFindings(run: RunDetail) {
   const screen = run.steps.find((s) => s.key === "screen")?.detail ?? null;
   const extract = run.steps.find((s) => s.key === "extract")?.detail ?? null;
   const suspicious = run.extraction?.suspicious_content ?? (isRecord(extract) ? extract.suspicious_content : undefined);
   const evidence = buildSecurityEvidence({ injectionHits: screen?.injectionHits, hiddenText: screen?.hiddenText, suspicious });
+  return { screen, suspicious, evidence };
+}
+
+/** The shield banner of a security-flagged run, with what was found quoted once and which detectors caught it. */
+function SecurityPanel({ findings }: { findings: ReturnType<typeof securityFindings> }) {
+  const { screen, suspicious, evidence } = findings;
   const raw = (value: unknown, cap: number) => asStrings(value, cap).map((s) => displayText(s, 600)).filter((s) => s !== "");
   return (
     <SecurityBanner className="mt-4">
@@ -119,11 +128,10 @@ function SecurityPanel({ run }: { run: RunDetail }) {
   );
 }
 
-/** Reasons as a list: the first five, the rest behind a real button. */
-function Reasons({ reasons, decision, title }: { reasons: readonly string[]; decision: Decision | null; title: string }) {
+/** Reasons (display-ready) as a list: the first five, the rest behind a real button. */
+function Reasons({ texts, decision, title }: { texts: readonly string[]; decision: Decision | null; title: string }) {
   const [all, setAll] = useState(false);
   const listId = useId();
-  const texts = reasons.map((r) => displayText(r, 1200)).filter((r) => r !== "");
   const shown = all ? texts : texts.slice(0, SHOWN_REASONS);
   const hidden = texts.length - SHOWN_REASONS;
   const dot = decision ? REASON_DOT[decision] : "bg-muted-foreground";
@@ -144,6 +152,27 @@ function Reasons({ reasons, decision, title }: { reasons: readonly string[]; dec
           {all ? "Show fewer reasons" : `Show ${hidden} more ${hidden === 1 ? "reason" : "reasons"}`}
         </Button>
       ) : null}
+    </section>
+  );
+}
+
+/**
+ * Notes that did not decide a held or rejected run (a warning with severity info, such as the scan's "No text layer to
+ * verify against"): under a quieter heading with a neutral marker, so they never read as a cause (routes-ui UI-5).
+ */
+function Notes({ texts }: { texts: readonly string[] }) {
+  if (texts.length === 0) return null;
+  return (
+    <section className="space-y-1.5">
+      <h3 className="text-sm font-medium text-muted-foreground">Also noted</h3>
+      <ul className="space-y-1.5">
+        {texts.map((text, i) => (
+          <li key={i} className="flex gap-2.5 text-sm text-muted-foreground">
+            <span aria-hidden="true" className="mt-2 size-1.5 shrink-0 rounded-full border border-muted-foreground" />
+            <span className="min-w-0 break-words [overflow-wrap:anywhere]">{text}</span>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
@@ -199,6 +228,8 @@ export interface DecisionCardProps {
  * bar. When it is done: the big decision badge, the shield banner for a flagged run (the hidden text quoted),
  * the reasons, the next action, and the model, prompt, duration and cost. A run that stopped without a decision
  * shows its reason and next action under an Error badge; a pre-loaded history run says what it is.
+ * A hold or a reject lists what decided it under "Why ..." and its info notes under "Also noted"; the reasons of a
+ * flagged run do not repeat the quote the banner shows (decision-reasons.ts). The stored reasons are not changed.
  */
 export function DecisionCard({ run }: DecisionCardProps) {
   const headingId = useId();
@@ -251,6 +282,14 @@ export function DecisionCard({ run }: DecisionCardProps) {
   const errored = run.status === "error";
   const decision = run.decision;
   const reasons = run.decision_reasons;
+  const findings = run.security_flag ? securityFindings(run) : null;
+  // A hold or a reject lists what decided it under "Why ..." and its info notes apart (UI-5); a flagged run's reasons
+  // that quote what the banner shows become one entry without the quote (UI-6). Nothing stored changes.
+  const groups =
+    !errored && (decision === "HOLD" || decision === "REJECT")
+      ? groupReasons(run, findings ? findings.evidence.items.flatMap((item) => item.sources) : [])
+      : null;
+  const listed = groups ? groups.causes : reasons.map((r) => displayText(r, REASON_CHARS)).filter((r) => r !== "");
   return (
     <section aria-labelledby={headingId} className={cn(CARD, "border-t-4", errored || !decision ? "border-t-reject-solid" : ACCENT[decision])}>
       <div className="flex flex-wrap items-center gap-3">
@@ -261,14 +300,15 @@ export function DecisionCard({ run }: DecisionCardProps) {
         </h2>
       </div>
 
-      {run.security_flag ? <SecurityPanel run={run} /> : null}
+      {findings ? <SecurityPanel findings={findings} /> : null}
 
       <div className="mt-5 space-y-5">
         {reasons.length > 0 ? (
-          <Reasons reasons={reasons} decision={decision} title={errored ? "What happened" : decision ? REASON_TITLE[decision] : "Reasons"} />
+          <Reasons texts={listed} decision={decision} title={errored ? "What happened" : decision ? REASON_TITLE[decision] : "Reasons"} />
         ) : decision === "APPROVE" ? (
           <p className="text-base font-medium">All checks passed.</p>
         ) : null}
+        {groups ? <Notes texts={groups.notes} /> : null}
         {run.next_action ? <NextAction text={run.next_action} /> : null}
         {errored ? (
           <Button asChild variant="outline" size="lg">

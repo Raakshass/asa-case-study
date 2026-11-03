@@ -274,6 +274,8 @@ export interface SecurityEvidenceItem {
   text: string;
   /** every detector that reported this text, in a fixed order */
   detectors: Detector[];
+  /** every quote merged into this item, as each detector reported it (made fit for display); `text` is one of them */
+  sources: string[];
 }
 
 export interface SecurityEvidence {
@@ -342,21 +344,23 @@ export function buildSecurityEvidence(input: { injectionHits?: unknown; hiddenTe
     ["model", quotes(input.suspicious, 20)],
     ["scan", quotes(input.injectionHits, 20)],
   ];
-  const items: Array<{ text: string; detectors: Set<Detector> }> = [];
+  const items: Array<{ text: string; detectors: Set<Detector>; sources: string[] }> = [];
   for (const [detector, texts] of sources) {
     for (const text of texts) {
       const hit = items.find((item) => samePassage(item.text, text));
       if (hit) {
         hit.detectors.add(detector);
+        hit.sources.push(text);
         if (text.length > hit.text.length) hit.text = text; // show the most complete form
       } else {
-        items.push({ text, detectors: new Set([detector]) });
+        items.push({ text, detectors: new Set([detector]), sources: [text] });
       }
     }
   }
   const shown = items.slice(0, cap).map((item) => ({
     text: item.text,
     detectors: DETECTOR_ORDER.filter((d) => item.detectors.has(d)),
+    sources: item.sources,
   }));
   return { items: shown, more: Math.max(0, items.length - shown.length) };
 }
