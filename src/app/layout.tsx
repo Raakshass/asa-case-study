@@ -3,8 +3,8 @@ import "./globals.css";
 import { AppHeader } from "@/components/shared/app-header";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
-// No web fonts and no other external request: the system font stack is set in globals.css, so the app
-// works offline and under a strict Content-Security-Policy.
+// Fonts are self-hosted (src/app/fonts, declared in globals.css): no external request, so the app works offline
+// and under a strict Content-Security-Policy.
 
 export const metadata: Metadata = {
   title: {

@@ -45,7 +45,7 @@ export function NavLinks({ className }: { className?: string }) {
                 href={href}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm whitespace-nowrap transition-colors",
+                  "inline-flex h-10 items-center gap-2 rounded-md px-3 text-sm whitespace-nowrap transition-colors",
                   active
                     ? "bg-accent font-semibold text-accent-foreground"
                     : "font-medium text-muted-foreground hover:bg-muted hover:text-foreground",

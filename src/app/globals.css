@@ -3,27 +3,73 @@
 @import "shadcn/tailwind.css";
 
 /*
- * Design tokens for the invoice-approval UI (owner: UI-foundation).
+ * Design tokens for the invoice-approval UI, "the AP desk" (owner: UI-foundation).
  *
  * - Light theme only. Nothing in the app sets `.dark`, so the shadcn `dark:` variants stay inert on purpose
  *   (without the `@custom-variant dark` line below Tailwind would apply them whenever the OS is in dark
  *   mode and mix both themes).
- * - ONE accent colour: the deep blue `--primary`. shadcn's `--accent` is NOT a second brand colour: it is
- *   the pale tint of the same blue used for hover surfaces and the active nav item.
+ * - Palette: ink on paper. Cool grey-green paper page, white sheets, ink text, ONE action colour: the Prussian
+ *   blue `--primary`. shadcn's `--accent` is NOT a second brand colour: it is the pale tint of the same blue
+ *   used for hover surfaces and the active nav item.
  * - Decision colours are semantic tokens (approve green, hold amber, reject red) plus one for security flags
  *   (violet). They are also used for step statuses (pass / warn / fail). Colour is never the only signal:
  *   every use pairs it with an icon and a text label (see src/components/shared).
- * - Every text/background pair below is checked for WCAG AA (4.5:1; badges and banners aim for 7:1).
- * - No web fonts: the system font stack below keeps the app working offline and under a strict CSP.
+ * - Every text/background pair below is checked for WCAG AA (4.5:1; badges and banners aim for 5:1 or better).
+ *   Measured on white: ink 15.6, graphite 6.0, prussian 8.6, approve 6.7, hold 5.4, reject 6.6, security 9.3;
+ *   the form-field border is 3.1:1 (WCAG 1.4.11).
+ * - Fonts are self-hosted (src/app/fonts, SIL Open Font License): Atkinson Hyperlegible Next for text and
+ *   Atkinson Hyperlegible Mono for identifiers that are compared character by character (invoice and PO
+ *   numbers, bank accounts, hashes). No request leaves the app, so it works offline and under the strict CSP.
  */
 @custom-variant dark (&:is(.dark *));
 
-/* System font stacks: no web font download and no other external request of any kind. */
+/*
+ * Atkinson Hyperlegible: designed so that 0/O and 1/l/I cannot be confused (sample 4 is literally INV-O042 against
+ * INV-0042). Variable fonts, weights 200 to 800; the latin-ext file only loads for pages that need those glyphs.
+ */
+@font-face {
+  font-family: "Atkinson Hyperlegible Next";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("./fonts/atkinson-next-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Atkinson Hyperlegible Next";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("./fonts/atkinson-next-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Atkinson Hyperlegible Mono";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("./fonts/atkinson-mono-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Atkinson Hyperlegible Mono";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("./fonts/atkinson-mono-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 @theme {
-  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
-    "Segoe UI Symbol", "Noto Color Emoji";
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans: "Atkinson Hyperlegible Next", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji",
+    "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --font-mono: "Atkinson Hyperlegible Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
 }
 
 @theme inline {
@@ -96,74 +142,65 @@
 :root {
   color-scheme: light;
 
-  /* Neutrals: cool slate (hue 258), white cards on a very slightly tinted page. */
-  --background: oklch(0.977 0.004 258);
-  --foreground: oklch(0.205 0.025 262);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.205 0.025 262);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.205 0.025 262);
-  --secondary: oklch(0.955 0.008 258);
-  --secondary-foreground: oklch(0.27 0.03 262);
-  --muted: oklch(0.96 0.006 258);
-  --muted-foreground: oklch(0.47 0.025 260);
-  --border: oklch(0.905 0.01 258);
-  /* Form-field borders need 3:1 against the card (WCAG 1.4.11), unlike the quiet card borders above. */
-  --input: oklch(0.66 0.015 258);
+  /* AP desk palette. Measured contrast on white: ink 15.6:1, graphite 6.0:1, prussian 8.6:1,
+     approve 6.7:1, hold 5.4:1, reject 6.6:1, security 9.3:1, field border 3.1:1. */
+  --background: #eef1f0; /* paper */
+  --foreground: #18233a; /* ink */
+  --card: #ffffff; /* sheet */
+  --card-foreground: #18233a;
+  --popover: #ffffff;
+  --popover-foreground: #18233a;
+  --secondary: #e6ecf5;
+  --secondary-foreground: #18233a;
+  --muted: #f3f5f5;
+  --muted-foreground: #5a6472; /* graphite */
+  --border: #cdd3d6; /* rule */
+  --input: #8a949c; /* form-field border, >= 3:1 on white (WCAG 1.4.11) */
 
-  /* The one accent colour (deep blue) and its pale tint. */
-  --primary: oklch(0.43 0.19 264);
-  --primary-foreground: oklch(0.985 0.002 258);
-  --accent: oklch(0.945 0.025 264);
-  --accent-foreground: oklch(0.32 0.14 264);
-  --ring: oklch(0.55 0.19 264);
+  --primary: #1e4c8f; /* prussian: the one action colour */
+  --primary-foreground: #ffffff;
+  --accent: #e6ecf5; /* prussian tint: hover surfaces, active nav */
+  --accent-foreground: #163a6e;
+  --ring: #1e4c8f;
 
-  /* shadcn's destructive = the reject red, dark enough for text-destructive on bg-destructive/10. */
-  --destructive: oklch(0.505 0.2 27.5);
+  --destructive: #b42318;
 
-  /*
-   * Decisions and security. Per tone: ink (text and icons on the soft surface), soft surface, border,
-   * solid fill and the text colour for the solid fill.
-   */
-  --approve: oklch(0.4 0.1 152);
-  --approve-soft: oklch(0.982 0.018 155.8);
-  --approve-border: oklch(0.871 0.15 154.4);
-  --approve-solid: oklch(0.527 0.14 150);
-  --approve-solid-foreground: oklch(1 0 0);
+  --approve: #17694a;
+  --approve-soft: #eaf4ef;
+  --approve-border: #9ccbb4;
+  --approve-solid: #17694a;
+  --approve-solid-foreground: #ffffff;
+  --hold: #9a5b00;
+  --hold-soft: #fbf3e4;
+  --hold-border: #e2be7f;
+  --hold-solid: #9a5b00;
+  --hold-solid-foreground: #ffffff;
+  --reject: #b42318;
+  --reject-soft: #fbecea;
+  --reject-border: #e8a39d;
+  --reject-solid: #b42318;
+  --reject-solid-foreground: #ffffff;
+  --security: #5e2b97;
+  --security-soft: #f2ecf9;
+  --security-border: #c3a9e3;
+  --security-solid: #5e2b97;
+  --security-solid-foreground: #ffffff;
 
-  --hold: oklch(0.42 0.105 50);
-  --hold-soft: oklch(0.987 0.02 95.3);
-  --hold-border: oklch(0.879 0.165 91.6);
-  --hold-solid: oklch(0.828 0.165 84.4);
-  --hold-solid-foreground: oklch(0.279 0.077 45.6);
+  --chart-1: #1e4c8f;
+  --chart-2: #3f6aa8;
+  --chart-3: #6f8fbf;
+  --chart-4: #a3b8d8;
+  --chart-5: #d3dcec;
+  --radius: 0.375rem;
 
-  --reject: oklch(0.444 0.177 26.9);
-  --reject-soft: oklch(0.971 0.013 17.4);
-  --reject-border: oklch(0.808 0.105 19.6);
-  --reject-solid: oklch(0.505 0.2 27.5);
-  --reject-solid-foreground: oklch(1 0 0);
-
-  --security: oklch(0.438 0.218 303.7);
-  --security-soft: oklch(0.977 0.014 308.3);
-  --security-border: oklch(0.827 0.105 306.4);
-  --security-solid: oklch(0.496 0.255 301.9);
-  --security-solid-foreground: oklch(1 0 0);
-
-  --chart-1: oklch(0.43 0.19 264);
-  --chart-2: oklch(0.55 0.15 255);
-  --chart-3: oklch(0.67 0.11 250);
-  --chart-4: oklch(0.78 0.07 250);
-  --chart-5: oklch(0.88 0.04 250);
-  --radius: 0.625rem;
-
-  --sidebar: oklch(0.985 0.003 258);
-  --sidebar-foreground: oklch(0.205 0.025 262);
-  --sidebar-primary: oklch(0.43 0.19 264);
-  --sidebar-primary-foreground: oklch(0.985 0.002 258);
-  --sidebar-accent: oklch(0.945 0.025 264);
-  --sidebar-accent-foreground: oklch(0.32 0.14 264);
-  --sidebar-border: oklch(0.905 0.01 258);
-  --sidebar-ring: oklch(0.55 0.19 264);
+  --sidebar: #eef1f0;
+  --sidebar-foreground: #18233a;
+  --sidebar-primary: #1e4c8f;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e6ecf5;
+  --sidebar-accent-foreground: #163a6e;
+  --sidebar-border: #cdd3d6;
+  --sidebar-ring: #1e4c8f;
 }
 
 @layer base {
@@ -187,6 +224,43 @@
   :where(a, summary, [role="button"], [tabindex]:not([tabindex="-1"])):focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
+  }
+}
+
+/*
+ * The approval stamp (the one bold element of the AP desk): the decision drawn as a rubber stamp. Ink on a pale
+ * surface, a heavy border with a thin second line outside it, a 2 degree tilt and nothing else (no texture, no
+ * animation). The tone comes from the text-* and bg-*-soft classes the component adds, so border and text share
+ * one colour. It is the only uppercase text in the app.
+ */
+@layer components {
+  .stamp {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0.875rem;
+    border: 3px solid currentColor;
+    border-radius: 0.25rem;
+    box-shadow: 0 0 0 2px var(--card), 0 0 0 3px currentColor;
+    font-size: 1.25rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    line-height: 1.15;
+    text-transform: uppercase;
+    white-space: nowrap;
+    transform: rotate(-2deg);
+  }
+  .stamp svg {
+    width: 1.375rem;
+    height: 1.375rem;
+    flex-shrink: 0;
+  }
+  /* Accounting rules: a single line above a subtotal and a double line under the final figure (money sums only). */
+  .rule-single {
+    border-top: 1px solid var(--foreground);
+  }
+  .rule-double {
+    border-top: 3px double var(--foreground);
   }
 }
 

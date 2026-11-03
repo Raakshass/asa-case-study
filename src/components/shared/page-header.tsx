@@ -6,7 +6,7 @@ export interface PageHeaderProps {
   title: ReactNode;
   /** One short sentence under the title. */
   description?: ReactNode;
-  /** Small caption above the title, e.g. "Run" or a breadcrumb-like label. */
+  /** Small caption above the title: an identifier (a run id), set in the mono face. */
   eyebrow?: ReactNode;
   /** Buttons or links on the right (below the title on narrow screens). */
   actions?: ReactNode;
@@ -22,11 +22,11 @@ export function PageHeader({ title, description, eyebrow, actions, className }: 
     <header className={cn("flex flex-col gap-4 pb-6 sm:flex-row sm:items-end sm:justify-between", className)}>
       <div className="min-w-0 space-y-1">
         {eyebrow ? (
-          <p className="text-xs font-medium tracking-wider text-muted-foreground uppercase">{eyebrow}</p>
+          <p className="font-mono text-sm text-muted-foreground">{eyebrow}</p>
         ) : null}
-        <h1 className="text-2xl font-semibold tracking-tight break-words text-balance sm:text-3xl">{title}</h1>
+        <h1 className="text-[1.75rem] leading-tight font-semibold tracking-tight break-words text-balance">{title}</h1>
         {description ? (
-          <p className="max-w-prose text-sm text-muted-foreground sm:text-base">{description}</p>
+          <p className="max-w-prose text-base text-muted-foreground">{description}</p>
         ) : null}
       </div>
       {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}

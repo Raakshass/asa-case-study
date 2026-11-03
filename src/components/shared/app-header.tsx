@@ -11,10 +11,10 @@ export function AppHeader() {
   return (
     <header className="z-40 border-b bg-card md:sticky md:top-0">
       <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-x-6 gap-y-1 px-4 py-2 sm:px-6 lg:px-8">
-        <Link href="/" className="flex items-center gap-3 rounded-lg py-1">
+        <Link href="/" className="flex items-center gap-3 rounded-md py-1">
           <span
             aria-hidden="true"
-            className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground"
+            className="flex size-9 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground"
           >
             <FileCheck2 className="size-5" />
           </span>
