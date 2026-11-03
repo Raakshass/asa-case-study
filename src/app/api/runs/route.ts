@@ -3,6 +3,12 @@
  * sample ({ "sample": "<file name>" }, closed list). GET /api/runs: the dashboard rows and KPIs.
  * docs/CONTRACTS.md section 7. Everything in the request is untrusted: it is validated before use and never
  * echoed back, and no path is ever built from it.
+ *
+ * POST, in order (security SEC-6 in the fix round): an upload first needs a place among the uploads in progress
+ * (beginUpload: per address and in all; 429 otherwise, counted nowhere); then the rate limit, before the body is read
+ * (the per-address minute is recorded, the hourly cap only read); then the body, which must arrive whole within
+ * CONFIG.bodyReceiveTimeoutMs (408 otherwise); the hourly slot is taken only right before createRun and given back
+ * unless the request answers 202. So a client that stalls or crawls holds no hourly slot and no temp file for long.
  */
 import fs from "node:fs";
 import { z } from "zod";
@@ -10,7 +16,7 @@ import { CONFIG } from "@/lib/config";
 import { getDb } from "@/lib/db";
 import { sanitizeDisplayName, sha256, tooLargeReason } from "@/lib/pdf";
 import { createRun, enqueue } from "@/lib/pipeline";
-import { checkRateLimit, refundGlobalSlot } from "@/lib/ratelimit";
+import { type RateLimitResult, type UploadSlot, beginUpload, checkRateLimit, refundGlobalSlot, takeGlobalSlot } from "@/lib/ratelimit";
 import { SampleFileSchema, samplePdfPath } from "@/lib/samples";
 import type { CreateRunResponse } from "@/lib/types";
 import { apiError, clientIp, json, mediaType, readBody, serverError } from "../_lib/http";
@@ -29,8 +35,38 @@ const SampleBodySchema = z.object({ sample: SampleFileSchema });
 
 const BAD_CONTENT_TYPE = 'Send a multipart upload with a "file" field, or JSON like {"sample": "<sample file name>"}.';
 
-/** Hash the bytes, store them once as uploads/<hash>.pdf, create the queued run and hand it to the queue (not awaited). */
-async function startRun(bytes: Uint8Array, fileName: string): Promise<Response> {
+/** When this request took its hourly slot (takeGlobalSlot), so POST can give it back unless a run was created. */
+interface HourlySlot {
+  at: number | null;
+}
+
+/** 429 with Retry-After, from a refusal of the limiter or of the upload cap (fixed text, never the request's). */
+function tooMany(limit: RateLimitResult): Response {
+  return apiError(429, limit.message, { retryAfterSec: limit.retryAfterSec, headers: { "Retry-After": String(limit.retryAfterSec) } });
+}
+
+/** 408: the body did not arrive whole within CONFIG.bodyReceiveTimeoutMs (security SEC-6). Fixed text. */
+function tooSlow(what: "upload" | "request"): Response {
+  const sec = Math.ceil(CONFIG.bodyReceiveTimeoutMs / 1000);
+  return apiError(
+    408,
+    what === "upload"
+      ? `The upload did not arrive within ${sec} s, so it was stopped. Check your connection and try again, or send a smaller file.`
+      : `The request did not arrive within ${sec} s, so it was stopped. Check your connection and try again.`,
+  );
+}
+
+/**
+ * Takes the hourly slot, then hashes the bytes, stores them once as uploads/<hash>.pdf, creates the queued run and
+ * hands it to the queue (not awaited).
+ */
+async function startRun(bytes: Uint8Array, fileName: string, hourly: HourlySlot): Promise<Response> {
+  // Only now that the whole body is here (security SEC-6: an upload that stalls holds no slot). The cap is checked
+  // again: other requests may have taken the last slot since this one passed the door.
+  const at = Date.now();
+  const slot = takeGlobalSlot(at);
+  if (!slot.ok) return tooMany(slot);
+  hourly.at = at;
   const hash = sha256(bytes);
   await storeUpload(bytes, hash);
   const runId = createRun(getDb(), { fileName, fileHash: hash });
@@ -38,9 +74,9 @@ async function startRun(bytes: Uint8Array, fileName: string): Promise<Response> 
   return json({ runId } satisfies CreateRunResponse, { status: 202 });
 }
 
-async function fromSample(req: Request): Promise<Response> {
+async function fromSample(req: Request, hourly: HourlySlot): Promise<Response> {
   const body = await readBody(req, MAX_JSON_BYTES);
-  if (!body.ok) return apiError(413, "The request body is too large.");
+  if (!body.ok) return body.reason === "timeout" ? tooSlow("request") : apiError(413, "The request body is too large.");
   let value: unknown;
   try {
     value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body.bytes));
@@ -55,14 +91,15 @@ async function fromSample(req: Request): Promise<Response> {
   } catch {
     return apiError(404, "That sample is not available on this server.");
   }
-  return startRun(bytes, parsed.data.sample);
+  return startRun(bytes, parsed.data.sample, hourly);
 }
 
-async function fromUpload(req: Request): Promise<Response> {
+async function fromUpload(req: Request, hourly: HourlySlot): Promise<Response> {
   // The limit is enforced on the bytes that actually arrive, whatever Content-Length claims. The body goes to a temp
   // file as it arrives (slow or many uploads cost disk, not memory) and is parsed one upload at a time (RT-PIPE-02).
+  // It must arrive whole within CONFIG.bodyReceiveTimeoutMs; spoolBody removes the temp file when it does not (SEC-6).
   const spooled = await spoolBody(req, CONFIG.maxFileBytes + MULTIPART_OVERHEAD_BYTES);
-  if (!spooled.ok) return apiError(413, `${tooLargeReason(CONFIG.maxFileBytes)}.`);
+  if (!spooled.ok) return spooled.reason === "timeout" ? tooSlow("upload") : apiError(413, `${tooLargeReason(CONFIG.maxFileBytes)}.`);
   try {
     return await oneUploadAtATime(async () => {
       let form: FormData;
@@ -80,7 +117,7 @@ async function fromUpload(req: Request): Promise<Response> {
       if (file.size > CONFIG.maxFileBytes) return apiError(413, `${tooLargeReason(CONFIG.maxFileBytes)}.`);
       const bytes = new Uint8Array(await file.arrayBuffer());
       if (bytes.byteLength > CONFIG.maxFileBytes) return apiError(413, `${tooLargeReason(CONFIG.maxFileBytes)}.`);
-      return startRun(bytes, sanitizeDisplayName(file.name));
+      return startRun(bytes, sanitizeDisplayName(file.name), hourly);
     });
   } finally {
     await removeQuietly(spooled.file);
@@ -88,23 +125,29 @@ async function fromUpload(req: Request): Promise<Response> {
 }
 
 export async function POST(req: Request): Promise<Response> {
-  const at = Date.now();
-  let allowed = false;
+  let upload: UploadSlot | null = null;
+  const hourly: HourlySlot = { at: null };
   let created = false;
   try {
-    // Before the body is read: a limited client costs the server nothing.
-    const limit = checkRateLimit(clientIp(req), at);
-    if (!limit.ok) {
-      return apiError(429, limit.message, { retryAfterSec: limit.retryAfterSec, headers: { "Retry-After": String(limit.retryAfterSec) } });
+    const ip = clientIp(req);
+    const kind = mediaType(req);
+    if (kind === "multipart/form-data") {
+      // A place among the uploads in progress (per address and in all) before anything else: a refusal costs nothing,
+      // is counted nowhere and never touches the body (security SEC-6).
+      upload = beginUpload(ip);
+      if (!upload.ok) return tooMany(upload);
     }
-    allowed = true;
+    // Before the body is read: a limited client costs the server nothing. The hourly cap is only read here; the slot
+    // is taken in startRun once the body has arrived (SEC-6).
+    const limit = checkRateLimit(ip, Date.now(), { recordGlobal: false });
+    if (!limit.ok) return tooMany(limit);
     let res: Response;
-    switch (mediaType(req)) {
+    switch (kind) {
       case "application/json":
-        res = await fromSample(req);
+        res = await fromSample(req, hourly);
         break;
       case "multipart/form-data":
-        res = await fromUpload(req);
+        res = await fromUpload(req, hourly);
         break;
       default:
         res = apiError(400, BAD_CONTENT_TYPE);
@@ -114,8 +157,9 @@ export async function POST(req: Request): Promise<Response> {
   } catch (e) {
     return serverError("POST /api/runs", e);
   } finally {
+    upload?.release();
     // the hourly cap protects model credit, so only a request that created a run spends it (RT-PIPE-03)
-    if (allowed && !created) refundGlobalSlot(at);
+    if (hourly.at !== null && !created) refundGlobalSlot(hourly.at);
   }
 }
 

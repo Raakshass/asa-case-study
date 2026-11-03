@@ -5,24 +5,27 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { paths, uploadPath } from "@/lib/config";
-import { declaredLength } from "./http";
+import { CONFIG, paths, uploadPath } from "@/lib/config";
+import { type BodyFailure, bodyDeadline, declaredLength } from "./http";
 
 /** The only names the reset route is allowed to delete. */
 export const UPLOAD_FILE_RE = /^[a-f0-9]{64}\.pdf$/;
 
-export type SpooledBody = { ok: true; file: string; size: number } | { ok: false };
+export type SpooledBody = { ok: true; file: string; size: number } | { ok: false; reason: BodyFailure };
 
 /**
  * Streams the request body into a new temp file in the uploads directory, never more than `maxBytes`, without
  * holding it in memory (red team RT-PIPE-02: buffering every upload whole cost ~37 MB of RSS per 10 MB upload, so 60
  * at once added 2.2 GB). A declared Content-Length above the limit is refused before a byte is read; the bytes that
- * arrive are counted too (the header can lie, or be absent) and reading stops as soon as the limit is crossed. The
- * caller owns the returned file and must remove it (removeQuietly). The name never matches UPLOAD_FILE_RE.
+ * arrive are counted too (the header can lie, or be absent) and reading stops as soon as the limit is crossed
+ * ("too_large"). The whole body must arrive within `timeoutMs` (default CONFIG.bodyReceiveTimeoutMs, read at call
+ * time; security SEC-6): otherwise reading stops and the result is "timeout". On either failure the temp file is
+ * already removed. The caller owns a returned file and must remove it (removeQuietly). The name never matches
+ * UPLOAD_FILE_RE.
  */
-export async function spoolBody(req: Request, maxBytes: number): Promise<SpooledBody> {
+export async function spoolBody(req: Request, maxBytes: number, timeoutMs: number = CONFIG.bodyReceiveTimeoutMs): Promise<SpooledBody> {
   const declared = declaredLength(req);
-  if (declared !== null && declared > maxBytes) return { ok: false };
+  if (declared !== null && declared > maxBytes) return { ok: false, reason: "too_large" };
   const dir = paths.uploadsDir;
   await fs.promises.mkdir(dir, { recursive: true });
   const file = path.join(dir, `.incoming-${crypto.randomUUID()}.tmp`);
@@ -32,15 +35,21 @@ export async function spoolBody(req: Request, maxBytes: number): Promise<Spooled
     let size = 0;
     if (req.body !== null) {
       const reader = req.body.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > maxBytes) {
-          await reader.cancel().catch(() => undefined);
-          return { ok: false };
+      const deadline = bodyDeadline(reader, timeoutMs);
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (deadline.expired()) return { ok: false, reason: "timeout" };
+          if (done) break;
+          size += value.byteLength;
+          if (size > maxBytes) {
+            await reader.cancel().catch(() => undefined);
+            return { ok: false, reason: "too_large" };
+          }
+          for (let at = 0; at < value.byteLength; ) at += (await handle.write(value, at, value.byteLength - at)).bytesWritten;
         }
-        for (let at = 0; at < value.byteLength; ) at += (await handle.write(value, at, value.byteLength - at)).bytesWritten;
+      } finally {
+        deadline.stop();
       }
     }
     kept = true;

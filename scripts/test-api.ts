@@ -205,7 +205,10 @@ async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Pr
 }
 
 /** CONFIG is `as const` (readonly types) but a plain object at run time: tests may narrow a limit and must restore it. */
-async function withConfig<T>(patch: Partial<Record<"maxFileBytes" | "stagePacingMs" | "stageTimeoutMs" | "resetIdleWaitMs", number>>, fn: () => Promise<T> | T): Promise<T> {
+async function withConfig<T>(
+  patch: Partial<Record<"maxFileBytes" | "stagePacingMs" | "stageTimeoutMs" | "resetIdleWaitMs" | "bodyReceiveTimeoutMs", number>>,
+  fn: () => Promise<T> | T,
+): Promise<T> {
   const cfg = CONFIG as unknown as Record<string, number>;
   const saved = Object.fromEntries(Object.keys(patch).map((k) => [k, cfg[k]]));
   Object.assign(cfg, patch);
@@ -1293,6 +1296,77 @@ async function ratelimitGroup(t: Check): Promise<void> {
     t.eq(checkRateLimit("6.6.6.6", T0 + 20).scope, "ip", "refunded calls still count toward the address's 10 per minute");
     resetRateLimits();
   });
+
+  await t.test("fix round SEC-6: with { recordGlobal: false } an allowed call holds no hourly slot; takeGlobalSlot takes it right before the run, checks the cap again and can be refunded", () => {
+    resetRateLimits();
+    withEnvSync({ MAX_RUNS_PER_HOUR: "2" }, () => {
+      for (let i = 0; i < 6; i++) t.eq(checkRateLimit(`4.4.4.${i}`, T0 + i, { recordGlobal: false }).ok, true, `door ${i + 1}`);
+      t.eq(rateLimiterSize(), { ips: 6, global: 0 }, "six calls passed the door of a cap of 2: each address is recorded, no hourly slot is held");
+      t.eq(limiter.takeGlobalSlot(T0 + 10), { ok: true, retryAfterSec: 0, message: "", scope: null }, "the first run takes a slot");
+      t.eq(limiter.takeGlobalSlot(T0 + 20).ok, true, "the second run takes the last one");
+      const late = limiter.takeGlobalSlot(T0 + 30);
+      t.eq([late.ok, late.scope, late.retryAfterSec], [false, "global", 3600], "the cap is checked again at the take: the oldest slot (T0 + 10 ms) leaves the hour 3599.98 s later");
+      t.includes(late.message, "2 runs per hour");
+      t.eq(rateLimiterSize().global, 2, "a refused take records nothing");
+      const door = checkRateLimit("4.4.4.9", T0 + 40, { recordGlobal: false });
+      t.eq([door.ok, door.scope], [false, "global"], "a full hour is still refused at the door, before any body is read");
+      t.eq(rateLimiterSize().ips, 6, "and that refusal records nothing either");
+      limiter.refundGlobalSlot(T0 + 20);
+      t.eq(rateLimiterSize().global, 1, "refundGlobalSlot gives back a slot taken with takeGlobalSlot");
+      t.eq(limiter.takeGlobalSlot(T0 + 50).ok, true, "so the next run can take it");
+      t.eq(limiter.takeGlobalSlot(T0 + 3_600_010).ok, true, "a taken slot leaves the hour like any other");
+    });
+    resetRateLimits();
+    for (let i = 0; i < 10; i++) t.eq(checkRateLimit("3.3.3.3", T0 + i, { recordGlobal: false }).ok, true, `call ${i + 1}`);
+    t.eq(checkRateLimit("3.3.3.3", T0 + 20, { recordGlobal: false }).scope, "ip", "the address's 10 per minute is unchanged");
+    t.eq(rateLimiterSize().global, 0);
+    resetRateLimits();
+  });
+
+  await t.test("fix round SEC-6: beginUpload caps the uploads in progress per address (the limiter's buckets) and in all; a refusal holds and records nothing; release is idempotent", () => {
+    resetRateLimits();
+    const { beginUpload, uploadsInFlight } = limiter;
+    const perIp = CONFIG.maxUploadsInFlightPerIp;
+    const cap = CONFIG.maxUploadsInFlight;
+    t.ok(perIp >= 1 && cap >= 10 && cap > perIp, `caps: ${perIp} per address, ${cap} in all (RT-PIPE-02's test sends 10 at once)`);
+    t.eq(uploadsInFlight(), { total: 0, ips: 0 }, "nothing in progress");
+    const held: ReturnType<typeof beginUpload>[] = [];
+    for (let i = 0; i < perIp; i++) {
+      const slot = beginUpload("2001:db8:7:7::1");
+      t.eq([slot.ok, slot.retryAfterSec, slot.message, slot.scope], [true, 0, "", null], `upload ${i + 1} of the address`);
+      held.push(slot);
+    }
+    for (const same of ["2001:db8:7:7::beef", "[2001:db8:7:7::2]:443", "2001:DB8:7:7:0:0:0:3"]) {
+      const refused = beginUpload(same);
+      t.eq([refused.ok, refused.scope, refused.retryAfterSec], [false, "ip", CONFIG.uploadsBusyRetryAfterSec], `${same} is in the same /64`);
+      t.includes(refused.message, `already sending ${perIp} files`);
+      t.includes(refused.message, `${CONFIG.uploadsBusyRetryAfterSec} s`);
+      refused.release(); // a refusal has nothing to give back
+    }
+    t.eq(uploadsInFlight(), { total: perIp, ips: 1 }, "refusals hold nothing");
+    for (let i = 0; i < perIp; i++) held.push(beginUpload("::ffff:192.0.2.70"));
+    t.eq(beginUpload("192.0.2.70:5555").scope, "ip", "an IPv4-mapped address and an IPv4 address with a port share one bucket");
+    let n = 0;
+    while (uploadsInFlight().total < cap) {
+      const slot = beginUpload(`10.77.0.${++n}`);
+      t.ok(slot.ok, `below the cap in all (${uploadsInFlight().total})`);
+      held.push(slot);
+    }
+    const full = beginUpload("198.51.100.200");
+    t.eq([full.ok, full.scope, full.retryAfterSec], [false, "global", CONFIG.uploadsBusyRetryAfterSec], "the cap in all");
+    t.includes(full.message, "too many files at once");
+    t.eq(rateLimiterSize(), { ips: 0, global: 0 }, "the rate limiter was never touched");
+    held[0].release();
+    held[0].release();
+    t.eq(uploadsInFlight().total, cap - 1, "a second release does not give back another upload's place");
+    const again = beginUpload("2001:db8:7:7::9");
+    t.eq(again.ok, true, "the freed place can be taken again");
+    held.push(again);
+    resetRateLimits();
+    t.eq(uploadsInFlight().total, cap, "resetRateLimits leaves uploads in progress alone (they are live requests)");
+    for (const slot of held) slot.release();
+    t.eq(uploadsInFlight(), { total: 0, ips: 0 }, "every place is back, and an address without an upload has no entry");
+  });
 }
 
 function withEnvSync(vars: Record<string, string>, fn: () => void): void {
@@ -1310,6 +1384,63 @@ function withEnvSync(vars: Record<string, string>, fn: () => void): void {
     }
   }
 }
+
+/* ---- fix round SEC-6: clients that stall or crawl ---- */
+
+const SEC6_MULTIPART = "multipart/form-data; boundary=sec6-boundary-7f3a";
+/** One multipart part header and the first bytes of a PDF: what a stalling client sends before it goes quiet. */
+const sec6PartHead = (): Uint8Array =>
+  new TextEncoder().encode('--sec6-boundary-7f3a\r\nContent-Disposition: form-data; name="file"; filename="stall.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.7\n');
+
+/** A POST /api/runs whose body the test sends piece by piece (or never finishes). The route is called at once. */
+interface HeldPost {
+  readonly req: Request;
+  /** the route's answer, once it has come */
+  answer(): Response | null;
+  /** the answer, or null when it has not come within `ms` (a test never waits on a request without a bound) */
+  settle(ms: number): Promise<Response | null>;
+  send(bytes: Uint8Array): void;
+  finish(): void;
+  /** the client goes away: the body breaks off (nothing happens once it is closed or cancelled) */
+  drop(): void;
+  /** the server stopped reading: it cancelled the body */
+  cancelled(): boolean;
+}
+function heldPost(contentType: string, ip: string, first: Uint8Array | null): HeldPost {
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let open = true;
+  let wasCancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+      if (first !== null) c.enqueue(first);
+    },
+    cancel() {
+      open = false;
+      wasCancelled = true;
+    },
+  });
+  const req = new Request(`${ORIGIN}/api/runs`, { method: "POST", headers: { "content-type": contentType, "x-forwarded-for": ip }, body: stream, duplex: "half" } as RequestInit);
+  let answer: Response | null = null;
+  const answered = runsRoute.POST(req).then((res) => (answer = res));
+  return {
+    req,
+    answer: () => answer,
+    settle: (ms) => Promise.race([answered, sleep(ms).then(() => null)]),
+    send: (bytes) => void (open && controller?.enqueue(bytes)),
+    finish: () => {
+      if (open) controller?.close();
+      open = false;
+    },
+    drop: () => {
+      if (open) controller?.error(new Error("client went away"));
+      open = false;
+    },
+    cancelled: () => wasCancelled,
+  };
+}
+/** Temp files of uploads that are still arriving (or were left behind). */
+const incomingFiles = (): string[] => uploadsListing().filter((n) => n.startsWith(".incoming-"));
 
 /* ================================================================================================
  * Group: routes
@@ -1856,6 +1987,241 @@ async function routesGroup(t: Check): Promise<void> {
     t.ok(!/vendors|SELECT|no such table|\.ts\b|node_modules/.test(lines[0]), `no SQL, table or path in the log line: ${lines[0]}`);
     t.eq((await masterRoute.GET()).status, 200, "and the next request is fine");
   });
+
+  await t.test(
+    "fix round SEC-6: 60 uploads that stall (6 addresses x 10) hold no hourly slot: an honest run and an honest upload still get 202, and at the deadline each stalled body is cut off with 408 and leaves no temp file",
+    async () => {
+      limiter.resetRateLimits();
+      const perIp = CONFIG.maxUploadsInFlightPerIp;
+      const attackers = ["192.0.2.101", "192.0.2.102", "192.0.2.103", "192.0.2.104", "192.0.2.105", "192.0.2.106"];
+      const inFlight = attackers.length * perIp;
+      const stalled: HeldPost[] = [];
+      const everyone: HeldPost[] = [];
+      try {
+        await withEnv({ MAX_RUNS_PER_HOUR: "60" }, () =>
+          withConfig({ bodyReceiveTimeoutMs: 1_000 }, async () => {
+            const started = Date.now();
+            for (const ip of attackers) for (let i = 0; i < 10; i++) stalled.push(heldPost(SEC6_MULTIPART, ip, sec6PartHead()));
+            const jsonStall = heldPost("application/json", "192.0.2.107", new TextEncoder().encode('{"sample": "07-recurring'));
+            everyone.push(...stalled, jsonStall);
+            for (let i = 0; i < 200 && incomingFiles().length < inFlight; i++) await sleep(10);
+            // the reviewer's repro: an honest user starts a run while the 60 bodies hang (before: 429 "Try again in 60 min")
+            const honest = await runsRoute.POST(postJson({ sample: "07-recurring-not-duplicate.pdf" }));
+            t.eq(honest.status, 202, "an honest sample run is not locked out while 60 uploads stall");
+            t.eq(limiter.rateLimiterSize().global, 1, "only that run holds an hourly slot; the stalled bodies hold none");
+            const refusedAtOnce = stalled.filter((s) => s.answer() !== null);
+            t.eq(refusedAtOnce.length, stalled.length - inFlight, `${perIp} uploads per address are in progress, the other ${stalled.length - inFlight} were refused at once`);
+            for (const s of refusedAtOnce) {
+              const res = s.answer() as Response;
+              const body = await expectError(t, res, 429, "an upload over the per-address cap");
+              t.includes(body.error, `already sending ${perIp} files`);
+              noInternals(t, body.error, "429 (per-address upload cap)");
+              t.eq([body.retryAfterSec, res.headers.get("retry-after")], [CONFIG.uploadsBusyRetryAfterSec, String(CONFIG.uploadsBusyRetryAfterSec)], "a short wait");
+              t.eq(s.req.body?.locked, false, "refused before its body was read");
+            }
+            t.eq(limiter.uploadsInFlight(), { total: inFlight, ips: attackers.length }, "the uploads in progress");
+            t.eq(incomingFiles().length, inFlight, "each upload in progress is being received into its own temp file");
+            t.eq(jsonStall.answer(), null, "a JSON body that stalls is still waiting too");
+            t.ok(inFlight < CONFIG.maxUploadsInFlight, `6 addresses can hold ${inFlight} of the ${CONFIG.maxUploadsInFlight} upload places, not all`);
+            const upload = await runsRoute.POST(postForm(formWith(new TextEncoder().encode(`%PDF-1.4\n% honest ${crypto.randomUUID()}\n`), "honest.pdf")));
+            t.eq(upload.status, 202, "an honest upload from another address is accepted");
+            const waiting = everyone.filter((s) => s.answer() === null);
+            t.eq(waiting.length, inFlight + 1, "the uploads in progress and the JSON body wait for their deadline");
+            const answers = await Promise.all(waiting.map((s) => s.settle(4_000)));
+            const took = Date.now() - started;
+            for (const [i, res] of answers.entries()) {
+              if (res === null) return t.fail(`stalled request ${i + 1} was not answered 4 s after its 1 s deadline`);
+              const body = await expectError(t, res, 408, `stalled request ${i + 1}`);
+              t.includes(body.error, "did not arrive within 1 s");
+              noInternals(t, body.error, "408");
+            }
+            t.ok(took >= 950 && took < 4_000, `cut off at the deadline (${took} ms after the first one started)`);
+            t.ok(waiting.every((s) => s.cancelled()), "the server stopped reading every stalled body");
+            t.eq(incomingFiles(), [], "no temp file is left behind");
+            t.eq(limiter.uploadsInFlight(), { total: 0, ips: 0 }, "every upload place is back");
+            t.eq(limiter.rateLimiterSize().global, 2, "the hourly cap holds exactly the two runs");
+            const later = await runsRoute.POST(postForm(formWith(new TextEncoder().encode(`%PDF-1.4\n% later ${crypto.randomUUID()}\n`), "later.pdf"), attackers[0]));
+            t.eq(later.status, 202, "an address whose uploads were cut off can upload again");
+          }),
+        );
+      } finally {
+        for (const s of everyone) s.drop();
+        await Promise.all(everyone.map((s) => s.settle(2_000)));
+        takeLogs();
+        await whenIdle();
+        limiter.resetRateLimits();
+      }
+    },
+    { timeoutMs: 30_000 },
+  );
+
+  await t.test(
+    "fix round SEC-6: the deadline counts the whole body, not idle time: an upload that crawls in under it is accepted, the same crawl past it is cut off with 408 and leaves no temp file",
+    async () => {
+      const framed = postForm(formWith(sampleBytes("10-not-an-invoice.pdf"), "crawl.pdf"));
+      const type = framed.headers.get("content-type") as string;
+      const body = new Uint8Array(await framed.arrayBuffer());
+      const posts: HeldPost[] = [];
+      /** sends the body in `parts` pieces `gapMs` apart (never idle for longer), then ends it; stops once the server cancels */
+      const crawl = (parts: number, gapMs: number): HeldPost => {
+        const post = heldPost(type, freshIp(), null);
+        posts.push(post);
+        void (async () => {
+          const size = Math.ceil(body.byteLength / parts);
+          for (let off = 0; off < body.byteLength && !post.cancelled(); off += size) {
+            post.send(body.subarray(off, off + size));
+            await sleep(gapMs);
+          }
+          post.finish();
+        })();
+        return post;
+      };
+      try {
+        await withConfig({ bodyReceiveTimeoutMs: 2_000 }, async () => {
+          let started = Date.now();
+          const slow = await crawl(10, 60).settle(8_000);
+          const slowMs = Date.now() - started;
+          t.eq(slow?.status, 202, `a crawl that ends after ${slowMs} ms, under the 2 s deadline, is accepted`);
+          t.ok(slowMs >= 540, `it really crawled (${slowMs} ms)`);
+          started = Date.now();
+          const tooSlow = crawl(100, 60); // about 6 s in all, never idle for more than 60 ms
+          const cut = await tooSlow.settle(8_000);
+          const cutMs = Date.now() - started;
+          if (cut === null) return t.fail("the crawl past the deadline was not answered within 8 s");
+          const err = await expectError(t, cut, 408, "a crawl past the deadline");
+          t.includes(err.error, "did not arrive within 2 s");
+          t.ok(cutMs >= 1_950 && cutMs < 4_500, `cut off at the deadline (${cutMs} ms), not when the crawl would have ended (about 6 s)`);
+          t.ok(tooSlow.cancelled(), "the server stopped reading");
+          t.eq(incomingFiles(), [], "no temp file is left behind");
+        });
+      } finally {
+        for (const p of posts) p.drop();
+        await Promise.all(posts.map((p) => p.settle(2_000)));
+        await whenIdle();
+      }
+    },
+    { timeoutMs: 30_000 },
+  );
+
+  await t.test(
+    "fix round SEC-6: over the cap of uploads in progress (per address, then in all) the answer is 429 with a short Retry-After, before the body is read and counted nowhere; sample runs are not capped; a body that breaks off gives its place back",
+    async () => {
+      limiter.resetRateLimits();
+      const perIp = CONFIG.maxUploadsInFlightPerIp;
+      const cap = CONFIG.maxUploadsInFlight;
+      const held: HeldPost[] = [];
+      const knock = (ip: string): Request =>
+        new Request(`${ORIGIN}/api/runs`, {
+          method: "POST",
+          headers: { "content-type": SEC6_MULTIPART, "x-forwarded-for": ip },
+          body: new ReadableStream<Uint8Array>({ pull() { throw new Error("the body was read"); } }, new CountQueuingStrategy({ highWaterMark: 0 })),
+          duplex: "half",
+        } as RequestInit);
+      try {
+        await withConfig({ bodyReceiveTimeoutMs: 15_000 }, async () => {
+          const busy = "192.0.2.150";
+          for (let i = 0; i < perIp; i++) held.push(heldPost(SEC6_MULTIPART, busy, sec6PartHead()));
+          const before = limiter.rateLimiterSize();
+          const req = knock(busy);
+          const res = await runsRoute.POST(req);
+          const body = await expectError(t, res, 429, "one more upload from an address whose uploads are all in progress");
+          t.eq(req.body?.locked, false, "refused before the body was touched");
+          t.eq([body.retryAfterSec, res.headers.get("retry-after")], [CONFIG.uploadsBusyRetryAfterSec, String(CONFIG.uploadsBusyRetryAfterSec)], "a short Retry-After");
+          t.includes(body.error, `already sending ${perIp} files`);
+          noInternals(t, body.error, "429 (per-address upload cap)");
+          t.eq(limiter.rateLimiterSize(), before, "counted nowhere: no call of the address, no hourly slot");
+          t.eq((await runsRoute.POST(postJson({ sample: "07-recurring-not-duplicate.pdf" }, busy))).status, 202, "the same address can still start a sample run");
+          let n = 0;
+          while (limiter.uploadsInFlight().total < cap) held.push(heldPost(SEC6_MULTIPART, `192.0.2.${160 + Math.floor(n++ / perIp)}`, sec6PartHead()));
+          const fresh = "198.51.100.250";
+          const ipsBefore = limiter.rateLimiterSize().ips;
+          const allRes = await runsRoute.POST(knock(fresh));
+          const all = await expectError(t, allRes, 429, "an upload while the server receives as many as it allows");
+          t.includes(all.error, "too many files at once");
+          noInternals(t, all.error, "429 (upload cap in all)");
+          t.eq(all.retryAfterSec, CONFIG.uploadsBusyRetryAfterSec, "a short Retry-After");
+          t.eq(limiter.rateLimiterSize().ips, ipsBefore, "the refused address was not recorded");
+          t.eq((await runsRoute.POST(postJson({ sample: "07-recurring-not-duplicate.pdf" }, fresh))).status, 202, "sample runs still start while every upload place is taken");
+          t.eq(held.filter((h) => h.answer() !== null).length, 0, "the uploads in progress are still waiting for their bodies");
+          for (let i = 0; i < 200 && incomingFiles().length < cap; i++) await sleep(10);
+          t.eq(incomingFiles().length, cap, "one temp file per upload in progress, no more");
+          for (const h of held) h.drop();
+          const answers = await Promise.all(held.map((h) => h.settle(3_000)));
+          t.eq(answers.map((a) => a?.status ?? "waiting"), Array(held.length).fill(500), "a body that breaks off is a 500, as before");
+          t.eq(limiter.uploadsInFlight(), { total: 0, ips: 0 }, "every place is back");
+          t.eq(incomingFiles(), [], "no temp file is left behind");
+          t.eq(limiter.rateLimiterSize().global, 2, "only the two sample runs hold hourly slots");
+          const again = await runsRoute.POST(postForm(formWith(new TextEncoder().encode(`%PDF-1.4\n% again ${crypto.randomUUID()}\n`), "again.pdf"), busy));
+          t.eq(again.status, 202, "the address can upload again");
+        });
+      } finally {
+        for (const h of held) h.drop();
+        await Promise.all(held.map((h) => h.settle(2_000)));
+        takeLogs(); // the 500s' log lines
+        await whenIdle();
+        limiter.resetRateLimits();
+      }
+    },
+    { timeoutMs: 30_000 },
+  );
+
+  await t.test(
+    "fix round SEC-6: the hourly slot is taken once the body is complete, right before the run is created: with one slot left both uploads pass the door, the first to finish gets 202, the other 429 and stores nothing; a failure after the take gives the slot back",
+    async () => {
+      limiter.resetRateLimits();
+      const held: HeldPost[] = [];
+      try {
+        await withEnv({ MAX_RUNS_PER_HOUR: "1" }, async () => {
+          const bodyOf = async (tag: string) => {
+            const file = new TextEncoder().encode(`%PDF-1.4\n% SEC-6 ${tag} ${crypto.randomUUID()}\n`);
+            const framed = postForm(formWith(file, `${tag}.pdf`));
+            return { file, type: framed.headers.get("content-type") as string, bytes: new Uint8Array(await framed.arrayBuffer()) };
+          };
+          const a = await bodyOf("first");
+          const b = await bodyOf("second");
+          const first = heldPost(a.type, freshIp(), a.bytes.subarray(0, 40));
+          const second = heldPost(b.type, freshIp(), b.bytes.subarray(0, 40));
+          held.push(first, second);
+          await sleep(50);
+          t.eq([first.answer()?.status ?? "waiting", second.answer()?.status ?? "waiting"], ["waiting", "waiting"], "both passed the door: the last slot is not held by a body still arriving");
+          t.eq(limiter.rateLimiterSize().global, 0, "no slot is taken yet");
+          first.send(a.bytes.subarray(40));
+          first.finish();
+          t.eq((await first.settle(3_000))?.status, 202, "the first complete body takes the last slot");
+          second.send(b.bytes.subarray(40));
+          second.finish();
+          const res = await second.settle(3_000);
+          if (res === null) return t.fail("the second upload was not answered");
+          const body = await expectError(t, res, 429, "the second complete body");
+          t.includes(body.error, "1 runs per hour");
+          t.ok(body.retryAfterSec !== undefined && body.retryAfterSec > 3_500, `the truthful wait until the slot leaves the hour (${body.retryAfterSec} s)`);
+          t.eq(res.headers.get("retry-after"), String(body.retryAfterSec), "Retry-After header");
+          t.ok(!fs.existsSync(uploadPath(sha256(b.file))), "the refused file was not stored");
+          t.ok(fs.existsSync(uploadPath(sha256(a.file))), "the accepted one was");
+          t.eq(limiter.rateLimiterSize().global, 1, "only the created run holds a slot");
+          t.eq(incomingFiles(), [], "no temp file is left behind");
+        });
+        // RT-PIPE-03's rule at the new place: a request that fails after it took its slot (here in createRun) gives it back
+        limiter.resetRateLimits();
+        await whenIdle();
+        db.exec("ALTER TABLE runs RENAME TO runs_hidden_sec6");
+        let status = 0;
+        try {
+          status = (await runsRoute.POST(postJson({ sample: "07-recurring-not-duplicate.pdf" }))).status;
+        } finally {
+          db.exec("ALTER TABLE runs_hidden_sec6 RENAME TO runs");
+        }
+        t.eq(status, 500, "createRun failed after the slot was taken");
+        t.eq(limiter.rateLimiterSize().global, 0, "and the slot was given back");
+      } finally {
+        for (const h of held) h.drop();
+        await Promise.all(held.map((h) => h.settle(2_000)));
+        takeLogs();
+        await whenIdle();
+        limiter.resetRateLimits();
+      }
+    },
+  );
 }
 
 /* ================================================================================================

@@ -3,7 +3,8 @@
  * CONFIG.rateLimitPerIpPerMinute (10) runs per IP per rolling minute and ENV.maxRunsPerHour runs per
  * rolling hour globally. Process-local: resets on restart (the OpenRouter key credit limit is the backstop).
  *
- * OWNER: Phase 5. Every exported signature of docs/CONTRACTS.md is kept; `rateLimiterSize` is additive.
+ * OWNER: Phase 5. Every exported signature of docs/CONTRACTS.md is kept; `rateLimiterSize`, `refundGlobalSlot`, the
+ * options argument of `checkRateLimit`, `takeGlobalSlot`, `beginUpload` and `uploadsInFlight` are additive.
  *
  * Both windows are sliding (each allowed call is remembered with its time), only ALLOWED calls are remembered,
  * so a client that keeps hammering while limited never extends its own lockout and the Retry-After it was
@@ -11,6 +12,11 @@
  * minute, at most MAX_TRACKED_IPS distinct addresses are kept (the least recently allowed one goes first), and
  * the global list never grows past the hourly cap because a full list rejects. State lives on globalThis so the
  * per-route module copies and dev hot reloads share one limiter.
+ *
+ * Fix round, security SEC-6: POST /api/runs checks the hourly cap at the door without taking a slot
+ * (`{ recordGlobal: false }`) and takes it with takeGlobalSlot once the body has arrived, right before the run is
+ * created, so an upload that stalls holds no hourly slot. beginUpload caps the uploads in progress at once, per
+ * address (same buckets as the limiter) and in all.
  */
 import { CONFIG, ENV } from "./config";
 
@@ -109,6 +115,25 @@ function normalizeIp(ip: string): string {
   return ipv6Bucket(key) ?? key;
 }
 
+/** The refusal of a full hourly cap: the wait until its oldest slot leaves the hour. */
+function hourlyRefusal(s: LimiterState, hourLimit: number, t: number): RateLimitResult {
+  const wait = waitSeconds(s.global[0], HOUR_MS, t);
+  return {
+    ok: false,
+    retryAfterSec: wait,
+    message: `The demo has reached its limit of ${hourLimit} runs per hour. Try again in ${describeWait(wait)}.`,
+    scope: "global",
+  };
+}
+
+export interface RateLimitOptions {
+  /**
+   * false: the hourly cap is checked but no slot is taken (the per-address call is still recorded); the caller takes
+   * the slot with takeGlobalSlot once the request is about to create a run. Default true: both are recorded.
+   */
+  recordGlobal?: boolean;
+}
+
 /**
  * Checks AND records one attempt for `ip` at `now` (ms since epoch, default Date.now()). Only allowed
  * attempts are recorded, so a client stuck at 429 does not extend its window. The caller derives ip from the
@@ -116,8 +141,10 @@ function normalizeIp(ip: string): string {
  * trusted proxy, which is why the global hourly cap exists) and gives the global slot back with refundGlobalSlot
  * when the request then creates no run. IPv6 addresses share one bucket per /64. When both limits trip, the one
  * that frees up last is reported, so retryAfterSec is the wait after which this call would pass.
+ * With `{ recordGlobal: false }` (what POST /api/runs passes, SEC-6) the hourly cap is only read here: a full hour is
+ * still refused before the body is read, but an allowed call holds no hourly slot until takeGlobalSlot.
  */
-export function checkRateLimit(ip: string, now: number = Date.now()): RateLimitResult {
+export function checkRateLimit(ip: string, now: number = Date.now(), opts: RateLimitOptions = {}): RateLimitResult {
   const t = Number.isFinite(now) ? now : Date.now();
   const s = state();
   const key = normalizeIp(ip);
@@ -144,12 +171,7 @@ export function checkRateLimit(ip: string, now: number = Date.now()): RateLimitR
         scope: "ip",
       };
     }
-    return {
-      ok: false,
-      retryAfterSec: globalWait,
-      message: `The demo has reached its limit of ${hourLimit} runs per hour. Try again in ${describeWait(globalWait)}.`,
-      scope: "global",
-    };
+    return hourlyRefusal(s, hourLimit, t);
   }
 
   // allowed: remember it (least recently allowed address first, so the map order is the eviction order)
@@ -164,16 +186,33 @@ export function checkRateLimit(ip: string, now: number = Date.now()): RateLimitR
   const times = hits ?? [];
   times.push(t);
   s.perIp.set(key, times);
+  if (opts.recordGlobal !== false) s.global.push(t);
+  return { ok: true, retryAfterSec: 0, message: "", scope: null };
+}
+
+/**
+ * Takes one slot of the hourly cap at `now` (ms since epoch, default Date.now()) when one is free, for a request that
+ * passed checkRateLimit(..., { recordGlobal: false }) and is about to create a run (SEC-6: an upload still arriving
+ * holds no slot). The cap is checked again here, because other requests may have taken the last slot since the door:
+ * refused, it answers like checkRateLimit's hourly refusal (scope "global", the truthful wait) and records nothing.
+ * The per-address window is not touched. Give the slot back with refundGlobalSlot(now) if no run is created after all.
+ */
+export function takeGlobalSlot(now: number = Date.now()): RateLimitResult {
+  const t = Number.isFinite(now) ? now : Date.now();
+  const s = state();
+  prune(s.global, t, HOUR_MS);
+  const hourLimit = ENV.maxRunsPerHour;
+  if (s.global.length >= hourLimit) return hourlyRefusal(s, hourLimit, t);
   s.global.push(t);
   return { ok: true, retryAfterSec: 0, message: "", scope: null };
 }
 
 /**
- * Gives back the hourly (global) slot that an allowed checkRateLimit call made at `at` recorded, for a request that
- * then created no run (400, 413, 500). Without it, 60 tiny malformed requests per hour kept run creation down for
- * every user (red team RT-PIPE-03): MAX_RUNS_PER_HOUR protects model credit, so only runs should spend it. The per-IP
- * count is kept (a client's own bad requests still slow that client down). Pass exactly the `now` given to
- * checkRateLimit; a slot that is no longer remembered is ignored.
+ * Gives back the hourly (global) slot that an allowed checkRateLimit call (or a takeGlobalSlot call) made at `at`
+ * recorded, for a request that then created no run (400, 413, 500). Without it, 60 tiny malformed requests per hour
+ * kept run creation down for every user (red team RT-PIPE-03): MAX_RUNS_PER_HOUR protects model credit, so only runs
+ * should spend it. The per-IP count is kept (a client's own bad requests still slow that client down). Pass exactly
+ * the `now` given to checkRateLimit / takeGlobalSlot; a slot that is no longer remembered is ignored.
  */
 export function refundGlobalSlot(at: number): void {
   const s = state();
@@ -181,7 +220,10 @@ export function refundGlobalSlot(at: number): void {
   if (i >= 0) s.global.splice(i, 1);
 }
 
-/** Clears all counters (tests). */
+/**
+ * Clears all counters (tests). Uploads in progress (beginUpload) are live requests, not counters: each one gives its
+ * own place back when it is answered, so they are not cleared here.
+ */
 export function resetRateLimits(): void {
   const s = state();
   s.perIp.clear();
@@ -193,4 +235,80 @@ export function resetRateLimits(): void {
 export function rateLimiterSize(): { ips: number; global: number } {
   const s = state();
   return { ips: s.perIp.size, global: s.global.length };
+}
+
+/* ---- uploads in progress (security SEC-6) ---- */
+
+interface UploadsState {
+  /** per address bucket (normalizeIp): uploads in progress; an address without one has no entry */
+  perIp: Map<string, number>;
+  /** uploads in progress in all */
+  total: number;
+}
+type GlobalWithUploads = typeof globalThis & { __invoiceApUploadsInFlight?: UploadsState };
+
+function uploadsState(): UploadsState {
+  const g = globalThis as GlobalWithUploads;
+  g.__invoiceApUploadsInFlight ??= { perIp: new Map(), total: 0 };
+  return g.__invoiceApUploadsInFlight;
+}
+
+export interface UploadSlot extends RateLimitResult {
+  /** Gives this upload's place back (idempotent; does nothing for a refused one). Call it once the request is answered. */
+  release(): void;
+}
+
+const NOTHING_TO_RELEASE = (): void => undefined;
+
+/**
+ * Starts one upload for `ip` if the caps allow it: at most CONFIG.maxUploadsInFlightPerIp per address (the limiter's
+ * buckets: IPv6 per /64, IPv4-mapped as IPv4, a port ignored) and CONFIG.maxUploadsInFlight in all, counted from the
+ * start of the request until it is answered. Security SEC-6: uploads that stall used to pile up, each with a temp
+ * file and a connection, until Node's 300 s request timeout. Refused: ok false, scope "ip" or "global", a short
+ * retryAfterSec (CONFIG.uploadsBusyRetryAfterSec) and a fixed message; a refusal records nothing anywhere (no
+ * per-address call, no hourly slot), which is why the route asks this before checkRateLimit. Allowed: call release()
+ * when the request is answered, on every path (a finally); a second call does nothing. The memory used is bounded by
+ * the caps: an address has an entry only while one of its uploads is in progress.
+ */
+export function beginUpload(ip: string): UploadSlot {
+  const s = uploadsState();
+  const key = normalizeIp(ip);
+  const mine = s.perIp.get(key) ?? 0;
+  const perIpCap = CONFIG.maxUploadsInFlightPerIp;
+  const ipFull = mine >= perIpCap;
+  if (ipFull || s.total >= CONFIG.maxUploadsInFlight) {
+    const wait = Math.max(1, Math.ceil(CONFIG.uploadsBusyRetryAfterSec));
+    return {
+      ok: false,
+      retryAfterSec: wait,
+      message: ipFull
+        ? `Your address is already sending ${perIpCap} files. Try again in ${describeWait(wait)}.`
+        : `The server is receiving too many files at once. Try again in ${describeWait(wait)}.`,
+      scope: ipFull ? "ip" : "global",
+      release: NOTHING_TO_RELEASE,
+    };
+  }
+  s.perIp.set(key, mine + 1);
+  s.total += 1;
+  let released = false;
+  return {
+    ok: true,
+    retryAfterSec: 0,
+    message: "",
+    scope: null,
+    release() {
+      if (released) return;
+      released = true;
+      const left = (s.perIp.get(key) ?? 1) - 1;
+      if (left > 0) s.perIp.set(key, left);
+      else s.perIp.delete(key);
+      s.total = Math.max(0, s.total - 1);
+    },
+  };
+}
+
+/** Uploads in progress right now: in all, and how many distinct address buckets have one (tests, diagnostics). */
+export function uploadsInFlight(): { total: number; ips: number } {
+  const s = uploadsState();
+  return { total: s.total, ips: s.perIp.size };
 }

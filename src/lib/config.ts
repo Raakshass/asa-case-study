@@ -59,6 +59,20 @@ export const CONFIG = {
   maxTaxRate: 0.1, // demo tax rate (ASSUMPTIONS.md); tax above this share of the pre-tax amount (+ cents) -> HOLD
   stageTimeoutMs: 300_000, // a pipeline stage that has not settled by then is an "error" step (-> HOLD); extract's own worst case is ~200 s (2 models x 2 attempts x 45 s + 429 waits)
   resetIdleWaitMs: 15_000, // POST /api/reset waits this long for the queue to go idle, then takes its turn on the chain
+
+  // ---- added in the fix round (security SEC-6: uploads that stall or crawl) ----
+  // Total time (not idle time) to receive the body of POST /api/runs, from the first read: a body that has not fully
+  // arrived by then is cut off with 408 and its temp file removed, so a stalled or crawling client cannot hold a temp
+  // file or a connection for Node's 300 s request timeout. 10 MB in 60 s needs about 1.4 Mbit/s of upload bandwidth; a
+  // typical invoice PDF (under 1 MB) needs about 0.14 Mbit/s.
+  bodyReceiveTimeoutMs: 60_000,
+  // Uploads (multipart POST /api/runs) in progress at once, from their start until they are answered. Per address: the
+  // start page sends one file at a time and waits for the answer, so 2 leaves room for a second tab or a second person
+  // behind the same address. In all: bounds the temp files to 16 x (10 MB + 64 KiB) ~ 161 MB of disk and 16 open files;
+  // uploads are parsed one at a time anyway, so more parallel receiving buys nothing. Over a cap: 429, nothing counted.
+  maxUploadsInFlightPerIp: 2,
+  maxUploadsInFlight: 16,
+  uploadsBusyRetryAfterSec: 5, // Retry-After of that 429: an upload in progress usually ends within seconds
 } as const;
 
 export type MockMode = "off" | "truth" | "fooled";
