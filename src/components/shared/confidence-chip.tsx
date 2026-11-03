@@ -1,6 +1,6 @@
 import { cn } from "cn";
 import { CONFIDENCE_TONE, confidenceTone } from "@/lib/format";
-import { SOFT_TONE, type Tone } from "./tones";
+import { INK_TONE, type Tone } from "./tones";
 
 const VIEW: Record<"high" | "medium" | "low", { label: string; tone: Tone; bars: 1 | 2 | 3 }> = {
   high: { label: "High confidence", tone: "approve", bars: 3 },
@@ -9,12 +9,12 @@ const VIEW: Record<"high" | "medium" | "low", { label: string; tone: Tone; bars:
 };
 
 const SIZE = {
-  sm: { box: "h-5 text-[11px]", pad: "gap-1 px-1.5 [&_svg]:size-3" },
-  md: { box: "h-6 text-xs", pad: "gap-1.5 px-2 [&_svg]:size-3.5" },
+  sm: { box: "text-xs", pad: "gap-1 [&_svg]:size-3" },
+  md: { box: "text-sm", pad: "gap-1.5 [&_svg]:size-3.5" },
 } as const;
 
-const BASE =
-  "inline-flex w-fit shrink-0 items-center justify-center rounded-full border font-medium tabular-nums whitespace-nowrap";
+/** Quiet: the level bars and the number in the tone's ink, no pill. */
+const BASE = "inline-flex w-fit shrink-0 items-center font-medium tabular-nums whitespace-nowrap";
 
 /**
  * Three bars of rising height; `filled` of them (1 low, 2 medium, 3 high) are solid and the rest faint.
@@ -46,7 +46,7 @@ export interface ConfidenceChipProps {
 export function ConfidenceChip({ value, size = "md", className }: ConfidenceChipProps) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return (
-      <span data-confidence="none" className={cn(BASE, SIZE[size].box, "px-2", SOFT_TONE.neutral, className)}>
+      <span data-confidence="none" className={cn(BASE, SIZE[size].box, INK_TONE.neutral, className)}>
         <span aria-hidden="true">–</span>
         <span className="sr-only">No confidence reported</span>
       </span>
@@ -64,7 +64,7 @@ export function ConfidenceChip({ value, size = "md", className }: ConfidenceChip
     <span
       data-confidence={level}
       title={`${label} (${threshold})`}
-      className={cn(BASE, SIZE[size].box, SIZE[size].pad, SOFT_TONE[tone], className)}
+      className={cn(BASE, SIZE[size].box, SIZE[size].pad, INK_TONE[tone], className)}
     >
       <LevelBars filled={bars} />
       <span>{value.toFixed(2)}</span>

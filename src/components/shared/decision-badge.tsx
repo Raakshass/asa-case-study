@@ -10,11 +10,12 @@ import {
 } from "lucide-react";
 import { cn } from "cn";
 import type { Decision, RunStatus } from "@/lib/types";
-import { SOFT_TONE, SOLID_TONE, type Tone } from "./tones";
+import { INK_TONE, STAMP_TONE, type Tone } from "./tones";
 
 /**
  * Label, tone and icon for each decision, so other components (KPI tiles, filter chips) match the badge.
- * `label` is the exact decision token; `outcome` is the same thing in the past tense for counts and filters.
+ * `label` is the exact decision token (data-decision, API); `outcome` is the same thing in the past tense: it is
+ * the word every badge, count and filter shows.
  */
 export const DECISION_META: Record<Decision, { label: Decision; outcome: string; tone: Tone; Icon: LucideIcon }> = {
   APPROVE: { label: "APPROVE", outcome: "Approved", tone: "approve", Icon: CircleCheck },
@@ -34,7 +35,7 @@ interface BadgeView {
 function viewFor(decision: Decision | null, runStatus: RunStatus | undefined): BadgeView {
   if (decision) {
     const meta = DECISION_META[decision];
-    return { key: decision, label: meta.label, tone: meta.tone, Icon: meta.Icon, spin: false };
+    return { key: decision, label: meta.outcome, tone: meta.tone, Icon: meta.Icon, spin: false };
   }
   switch (runStatus) {
     case "error":
@@ -48,10 +49,11 @@ function viewFor(decision: Decision | null, runStatus: RunStatus | undefined): B
   }
 }
 
+/** Quiet badges: icon plus a sentence-case word in the decision's ink, no pill, no fill (the stamp is the loud one). */
 const SIZE = {
-  sm: "h-5 gap-1 px-1.5 text-[11px] [&_svg]:size-3",
-  md: "h-6 gap-1.5 px-2.5 text-xs [&_svg]:size-3.5",
-  lg: "h-10 gap-2 px-4 text-base [&_svg]:size-5",
+  sm: "gap-1 text-sm [&_svg]:size-4",
+  md: "gap-1.5 text-sm [&_svg]:size-4",
+  lg: "gap-2 text-base [&_svg]:size-5",
 } as const;
 
 export interface DecisionBadgeProps {
@@ -61,25 +63,27 @@ export interface DecisionBadgeProps {
   runStatus?: RunStatus;
   /** sm for table rows, md (default) inline, lg for the decision card. */
   size?: keyof typeof SIZE;
-  /** soft: pale tint (default). solid: filled, for the big badge on the run page. */
+  /** soft: quiet icon and word (default). solid: the approval stamp, for the decision on the run page. */
   variant?: "soft" | "solid";
   className?: string;
 }
 
 /**
- * APPROVE (green check), HOLD (amber pause), REJECT (red cross), or a neutral in-progress state.
- * Always an icon AND a text label, never colour alone. Server-safe (no state, no effects).
+ * Approved (green check), On hold (amber pause), Rejected (red cross), or a neutral in-progress state.
+ * Always an icon AND a text label, never colour alone. The stamp variant draws the same words in capitals
+ * (CSS only; the text in the page stays sentence case). `data-decision` keeps the decision token.
+ * Server-safe (no state, no effects).
  */
 export function DecisionBadge({ decision, runStatus, size = "md", variant = "soft", className }: DecisionBadgeProps) {
   const view = viewFor(decision, runStatus);
   const { Icon } = view;
+  const stamp = variant === "solid";
   return (
     <span
       data-decision={view.key}
       className={cn(
-        "inline-flex w-fit shrink-0 items-center justify-center rounded-full border font-semibold tracking-wide whitespace-nowrap uppercase",
-        SIZE[size],
-        (variant === "solid" ? SOLID_TONE : SOFT_TONE)[view.tone],
+        "inline-flex w-fit shrink-0 items-center whitespace-nowrap",
+        stamp ? ["stamp", STAMP_TONE[view.tone]] : ["font-semibold", SIZE[size], INK_TONE[view.tone]],
         className,
       )}
     >

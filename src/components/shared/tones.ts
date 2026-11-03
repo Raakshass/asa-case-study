@@ -31,6 +31,16 @@ export const SOLID_TONE: Record<Tone, string> = {
   neutral: "border-transparent bg-foreground text-background",
 };
 
+/** The approval stamp: ink on the pale surface; the border takes the text colour (see .stamp in globals.css). */
+export const STAMP_TONE: Record<Tone, string> = {
+  approve: "bg-approve-soft text-approve",
+  hold: "bg-hold-soft text-hold",
+  reject: "bg-reject-soft text-reject",
+  security: "bg-security-soft text-security",
+  info: "bg-accent text-accent-foreground",
+  neutral: "bg-muted text-muted-foreground",
+};
+
 /** Text and icon colour only, for use on white or page-grey surfaces (every ink is 4.5:1 or better there). */
 export const INK_TONE: Record<Tone, string> = {
   approve: "text-approve",
