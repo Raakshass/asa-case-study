@@ -62,14 +62,12 @@ export function SampleCard({ sample, disabled, starting, onPick }: SampleCardPro
       <span className="flex items-start justify-between gap-3">
         <span className="min-w-0 text-base font-semibold break-words">{sample.title}</span>
         {sample.edge_case ? (
-          <span className="shrink-0 rounded-full border border-border bg-muted px-2 py-0.5 text-[11px] font-medium whitespace-nowrap text-muted-foreground">
-            Edge case {sample.edge_case}
-          </span>
+          <span className="shrink-0 text-sm whitespace-nowrap text-muted-foreground">Edge case {sample.edge_case}</span>
         ) : null}
       </span>
       <span className="block text-sm break-words text-muted-foreground">{sample.scenario}</span>
       <span className="mt-auto flex flex-wrap items-center justify-between gap-x-3 gap-y-2 pt-1">
-        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
           Expected
           <DecisionBadge decision={sample.expected} size="sm" />
         </span>
@@ -136,7 +134,7 @@ export interface SampleSectionProps {
 }
 
 /**
- * The grid of sample cards, loaded once from GET /api/samples (it never changes while the page is open).
+ * The sample cards in two groups (everyday cases, edge cases), loaded once from GET /api/samples (it never changes while the page is open).
  * Shows a skeleton while loading, an error with a retry button when the list cannot be loaded, and a note
  * when the server has no sample files.
  */
@@ -186,15 +184,27 @@ export function SampleSection({ disabled, startingFile, onPick, problem = null }
       />
     );
   }
+  // Two grouped lists: the everyday cases, then the ones that probe an edge of the rules.
+  const groups = [
+    { title: "Everyday cases", samples: data.filter((s) => !s.edge_case) },
+    { title: "Edge cases", samples: data.filter((s) => s.edge_case) },
+  ].filter((g) => g.samples.length > 0);
   return (
-    <ul className={GRID}>
-      {data.map((sample) => (
-        <li key={sample.file} className="flex flex-col gap-2">
-          <SampleCard sample={sample} disabled={disabled} starting={startingFile === sample.file} onPick={onPick} />
-          {lastRun.has(sample.file) ? <PriorResult file={sample.file} run={lastRun.get(sample.file) as RunListItem} /> : null}
-          {problem !== null && problem.file === sample.file ? <CardProblem title={problem.title} message={problem.message} /> : null}
-        </li>
+    <div className="space-y-8">
+      {groups.map((group) => (
+        <section key={group.title} className="space-y-3">
+          <h3 className="text-base font-semibold">{group.title}</h3>
+          <ul className={GRID}>
+            {group.samples.map((sample) => (
+              <li key={sample.file} className="flex flex-col gap-2">
+                <SampleCard sample={sample} disabled={disabled} starting={startingFile === sample.file} onPick={onPick} />
+                {lastRun.has(sample.file) ? <PriorResult file={sample.file} run={lastRun.get(sample.file) as RunListItem} /> : null}
+                {problem !== null && problem.file === sample.file ? <CardProblem title={problem.title} message={problem.message} /> : null}
+              </li>
+            ))}
+          </ul>
+        </section>
       ))}
-    </ul>
+    </div>
   );
 }

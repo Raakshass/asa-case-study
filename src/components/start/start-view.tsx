@@ -91,7 +91,7 @@ export function StartView() {
     <div className="space-y-10">
       <section aria-labelledby={`${headingId}-upload`} className="space-y-4">
         <div className="space-y-1">
-          <h2 id={`${headingId}-upload`} className="text-lg font-semibold tracking-tight">
+          <h2 id={`${headingId}-upload`} className="text-xl font-semibold tracking-tight">
             Upload an invoice
           </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
@@ -105,7 +105,7 @@ export function StartView() {
 
       <section aria-labelledby={`${headingId}-samples`} className="space-y-4">
         <div className="space-y-1">
-          <h2 id={`${headingId}-samples`} className="text-lg font-semibold tracking-tight">
+          <h2 id={`${headingId}-samples`} className="text-xl font-semibold tracking-tight">
             Or try a sample
           </h2>
           <p className="max-w-prose text-sm text-muted-foreground">
