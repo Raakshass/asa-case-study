@@ -191,3 +191,10 @@ Entry format:
 - Tests: `scripts/checks/business.ts` +2 (1.7% over is a candidate and 3.3% over is not, exactly 2% over passes and one cent more does not; the new sentence for a PO that covers the invoice only within the tolerance and for one with room).
 - Why: review plan task B5 (the same invoice was treated differently with and without a printed PO).
 - Affects: an invoice slightly over a PO's balance with no PO printed now gets that PO proposed (and, as always, HOLDs for a person to confirm) instead of "no open PO ... can be proposed".
+
+## 2026-11-03 review round B6 - src/lib/types.ts, extract.ts, pipeline.ts (one optional field added)
+- Before: `withinDeadline` raced a stage against a timer but could not stop it; after the 300 s deadline the extractor could go on with up to 3 more paid attempts across 2 models for a run that was already held.
+- After: `ExtractOptions.signal?: AbortSignal` (optional, additive). `withinDeadline(work, ms)` now calls `work(signal)` and aborts that signal in its timer callback before rejecting with `StageTimeout`; `attempt` and `stage` take `work: (signal) => ...` (the other stages' lambdas ignore it); stage 3 passes the signal to `deps.extract`. In `extract.ts`, `CallSpec.outer` carries it: each request's signal is `AbortSignal.any([own 45 s timer, outer])`, and `runWithFallback` returns the failure without starting anything once `outer` is aborted (checked before every attempt and before a 429 wait). `suggestPO` and the mock are unchanged.
+- Tests: `scripts/test-extract.ts` +3 (abort during a 429 wait: one request, no retry, no fallback; abort while a request is stalled: two requests, the stalled one cut at the abort, the cost of the answer that did arrive kept; an already aborted signal: no request); `scripts/test-api.ts`: the existing RT-PIPE-04 test also asserts that the extractor got a signal and that it was aborted at the deadline.
+- Why: review plan task B6.
+- Affects: nobody has to adapt (`signal` is optional). A held-by-timeout run stops spending credit.

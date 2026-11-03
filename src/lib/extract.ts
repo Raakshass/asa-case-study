@@ -385,6 +385,8 @@ interface CallSpec {
   key: string;
   endpoint: string;
   timeoutMs: number;
+  /** the pipeline stage's deadline (ExtractOptions.signal): once aborted, nothing further is started (review round B6) */
+  outer?: AbortSignal;
 }
 
 interface Called {
@@ -434,7 +436,7 @@ async function callOnce(model: string, payload: string, spec: CallSpec): Promise
           "X-OpenRouter-Title": "Invoice AP Agent",
         },
         body: payload,
-        signal: ctrl.signal,
+        signal: spec.outer ? AbortSignal.any([ctrl.signal, spec.outer]) : ctrl.signal,
         redirect: "error", // never follow a redirect with the key attached
         cache: "no-store",
       });
@@ -586,6 +588,7 @@ async function runWithFallback<T>(spec: RunSpec<T>): Promise<RunOutcome<T>> {
     lastModel = model;
     const payload = spec.payloadFor(model);
     for (let n = 1; n <= 2; n++) {
+      if (spec.outer?.aborted) return failed(false); // the stage deadline passed: start no further attempt (review round B6)
       const called = await callOnce(model, payload, spec);
       let attempt = called.attempt;
       let parsed: { value: T } | null = null;
@@ -620,6 +623,7 @@ async function runWithFallback<T>(spec: RunSpec<T>): Promise<RunOutcome<T>> {
           failure === "invalid_output" ||
           (failure === "rate_limited" && waitMs <= CONFIG.llmRetryAfterMaxMs));
       if (!retrySameModel) break;
+      if (spec.outer?.aborted) return failed(false);
       if (waitMs > 0) {
         try {
           await spec.sleep(waitMs);
@@ -716,6 +720,7 @@ export async function extractInvoice(pdf: Uint8Array, opts?: ExtractCallOptions)
       key,
       endpoint,
       timeoutMs: opts?.timeoutMs ?? CONFIG.llmTimeoutMs,
+      outer: opts?.signal,
       sleep: opts?.sleep ?? defaultSleep,
       payloadFor: (model) =>
         JSON.stringify(buildExtractRequestBody({ model, fileData, isImageOnly, engineOverride: opts?.engineOverride })),

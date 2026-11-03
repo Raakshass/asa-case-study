@@ -795,6 +795,39 @@ async function failureTests(t: Check): Promise<void> {
     });
   });
 
+  await t.test("B6: aborting during the wait before a retry starts no further request (no retry, no fallback model)", async () => {
+    const ctrl = new AbortController();
+    await scenario([{ status: 429, headers: { "retry-after": "2" }, json: errBody(429) }, { json: okBody() }, { json: okBody({ model: HAIKU }) }], async (c) => {
+      const r = expectFail(t, await c.extract({ models: [GEMINI, HAIKU], signal: ctrl.signal, sleep: async () => ctrl.abort() }), "unreadable");
+      t.eq(c.fake.seen.length, 1, "only the first request was made");
+      t.eq(failuresOf(r), ["rate_limited"]);
+      t.eq(r.costUsd, 0);
+    });
+  });
+
+  await t.test("B6: aborting while a request is in flight cancels it and starts nothing else; the cost of the answer that did arrive is kept", async () => {
+    const ctrl = new AbortController();
+    await scenario([{ json: okBody({ content: "not json", cost: 0.0123 }) }, { stall: true }, { json: okBody({ model: HAIKU }) }], async (c) => {
+      const timer = setTimeout(() => ctrl.abort(), 150);
+      const started = Date.now();
+      const r = expectFail(t, await c.extract({ models: [GEMINI, HAIKU], signal: ctrl.signal }), "unreadable");
+      clearTimeout(timer);
+      t.eq(c.fake.seen.length, 2, "the invalid first answer, then the stalled retry; the fallback model is never asked");
+      t.ok(Date.now() - started < 3000, "the stalled request was cut at the abort, not at its 5 s timeout");
+      t.eq(r.costUsd, 0.0123);
+    });
+  });
+
+  await t.test("B6: a signal that is already aborted makes no request at all", async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await scenario([{ json: okBody() }], async (c) => {
+      const r = expectFail(t, await c.extract({ signal: ctrl.signal }), "unreadable");
+      t.eq(c.fake.seen.length, 0);
+      t.eq(r.attempts, []);
+    });
+  });
+
   await t.test("failure: HTTP 429 with Retry-After over 10 s skips the same-model retry and falls back without waiting", async () => {
     await scenario([{ status: 429, headers: { "retry-after": "30" }, json: errBody(429) }, { json: okBody({ model: HAIKU }) }], async (c) => {
       const r = expectOk(t, await c.extract());

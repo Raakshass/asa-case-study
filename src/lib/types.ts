@@ -570,6 +570,8 @@ export interface ExtractOptions {
   engineOverride?: PdfEngine;
   /** eval-extract only: replaces [EXTRACT_MODEL, FALLBACK_MODEL] */
   models?: readonly string[];
+  /** aborted when the pipeline stage's deadline passes: no further model attempt is started (review round B6) */
+  signal?: AbortSignal;
 }
 
 /** extractInvoice() never throws; every failure is a value. costUsd/latencyMs cover all attempts. */

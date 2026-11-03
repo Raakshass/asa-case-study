@@ -1082,7 +1082,11 @@ async function pipelineGroup(t: Check): Promise<void> {
     const rig = makeRig();
     const stuck = rig.run(sampleBytes("02-within-tolerance.pdf"), "stuck.pdf");
     const next = rig.run(sampleBytes("01-happy-northwind.pdf"), "next.pdf");
-    const never: ExtractFn = () => new Promise<never>(() => undefined);
+    const seenSignals: (AbortSignal | undefined)[] = [];
+    const never: ExtractFn = (_pdf, opts) => {
+      seenSignals.push(opts?.signal);
+      return new Promise<never>(() => undefined);
+    };
     takeLogs();
     await withConfig({ stageTimeoutMs: 300 }, async () => {
       const started = Date.now();
@@ -1102,6 +1106,7 @@ async function pipelineGroup(t: Check): Promise<void> {
     t.eq([runRow(rig.db, next).status, runRow(rig.db, next).decision], ["done", "APPROVE"], "the run behind it is processed");
     const logged = takeLogs().map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => l.run === stuck && l.stage === "extract");
     t.eq([logged?.status, logged?.error], ["error", "StageTimeout"], "the log names the timeout");
+    t.eq([seenSignals.length, seenSignals[0]?.aborted], [1, true], "B6: the extractor got a signal and it was aborted at the deadline");
     await whenIdle();
   });
 

@@ -451,6 +451,7 @@ export interface ExtractOptions {
     isImageOnly?: boolean;
     engineOverride?: PdfEngine;
     models?: readonly string[];
+    signal?: AbortSignal; // added in review round B6: aborted at the pipeline stage's deadline, no further model attempt starts
 }
 export type ExtractResult = {
     ok: true;

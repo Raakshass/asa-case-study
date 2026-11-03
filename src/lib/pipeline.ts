@@ -215,16 +215,21 @@ class StageTimeout extends Error {
 
 /**
  * `work()`, or a StageTimeout after `ms`, whichever settles first (red team RT-PIPE-04: one stage that never settles
- * would otherwise hold the serial chain, every later run and POST /api/reset forever). The work itself cannot be
- * cancelled; its late result or error is dropped. The timer never outlives the race.
+ * would otherwise hold the serial chain, every later run and POST /api/reset forever). The work gets an AbortSignal
+ * that is aborted at the deadline, so the extractor starts no further attempt (review round B6); beyond that it cannot
+ * be cancelled, and its late result or error is dropped. The timer never outlives the race.
  */
-async function withinDeadline<T>(work: () => T | Promise<T>, ms: number): Promise<T> {
+async function withinDeadline<T>(work: (signal: AbortSignal) => T | Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new StageTimeout()), Math.min(Math.max(Number.isFinite(ms) ? ms : 0, 0), 2_147_483_647));
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new StageTimeout());
+    }, Math.min(Math.max(Number.isFinite(ms) ? ms : 0, 0), 2_147_483_647));
   });
   try {
-    return await Promise.race([Promise.resolve().then(work), expired]);
+    return await Promise.race([Promise.resolve().then(() => work(controller.signal)), expired]);
   } finally {
     clearTimeout(timer);
   }
@@ -379,7 +384,7 @@ async function execute(deps: PipelineDeps, run: RunRow): Promise<void> {
    * Mark running, pace, run within CONFIG.stageTimeoutMs, turn the outcome into a step (a throw or a timeout -> error
    * step, no outcome). Does not persist the result: stage() does, and decide writes it with the run's result.
    */
-  async function attempt<T>(key: StageKey, work: () => T | Promise<T>, toStep: (out: T) => StepResult): Promise<Attempt<T>> {
+  async function attempt<T>(key: StageKey, work: (signal: AbortSignal) => T | Promise<T>, toStep: (out: T) => StepResult): Promise<Attempt<T>> {
     const startedAt = iso();
     markRunning(db, runId, key, startedAt); // the run view shows the stage as working through the pause below
     if (executed++ > 0) await pause(deps.pacingMs); // between stages (before every one but the first), never after the last
@@ -400,7 +405,7 @@ async function execute(deps: PipelineDeps, run: RunRow): Promise<void> {
   }
 
   /** One stage: attempt it, persist the step, log. */
-  async function stage<T>(key: StageKey, work: () => T | Promise<T>, toStep: (out: T) => StepResult): Promise<T | null> {
+  async function stage<T>(key: StageKey, work: (signal: AbortSignal) => T | Promise<T>, toStep: (out: T) => StepResult): Promise<T | null> {
     const r = await attempt(key, work, toStep);
     writeStep(db, runId, key, r.step, r.startedAt, iso());
     logStage(runId, key, r.step.status, performance.now() - r.t0, r.failure);
@@ -436,7 +441,7 @@ async function execute(deps: PipelineDeps, run: RunRow): Promise<void> {
     if (steps.screen?.status === "fail") flagSecurity();
 
     // 3 extract; the fields are persisted at once so the run view shows them while the later stages run
-    const ex = await stage("extract", () => deps.extract(bytes, { isImageOnly }), (r) => checkExtract(r));
+    const ex = await stage("extract", (signal) => deps.extract(bytes, { isImageOnly, signal }), (r) => checkExtract(r));
     db.prepare("UPDATE runs SET extraction = ?, raw_model_output = ?, model = ?, prompt_version = ?, cost_usd = ? WHERE id = ?").run(
       ex?.ok ? JSON.stringify(ex.data) : null,
       ex?.ok ? ex.rawOutput : null,
