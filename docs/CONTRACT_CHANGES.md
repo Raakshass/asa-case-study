@@ -205,3 +205,10 @@ Entry format:
 - Tests: `scripts/smoke-http.ts`: the existing per-route header check now asserts a CSP with `default-src`, `frame-src`, `object-src 'none'`, `base-uri`, `form-action` and `frame-ancestors` on every path except `/api/files/*`, where it asserts there is none (it asserted "no CSP yet" for all of them).
 - Why: review plan task B7.
 - Affects: a page that needs an external script, style, font, image or connection would now be blocked (none does today); the PDF frame is unaffected on the PDF response itself.
+
+## 2026-11-03 review round B9 - src/lib/types.ts, ratelimit.ts and src/components/start/upload-rules.ts (one constant added; texts unchanged)
+- Before: the start page worded every 429 as "Too many runs were started in a short time. Please wait N seconds and try again.", including the two upload-cap refusals (R-3).
+- After: `types.ts` exports `UPLOAD_BUSY_PREFIXES` (the openings of the two upload-cap texts); `ratelimit.ts` `beginUpload` builds its two messages from them (text byte-identical to before); `startFailureMessage` returns a 429's own `error` when it starts with one of them. The rate-limit 429 and every other status are worded as before.
+- Tests: `scripts/test-api.ts` +1 (the two real `beginUpload` refusals read exactly as before and are shown unchanged by the page; a rate-limit 429 and a text that merely contains the opening keep the page's sentence; 413 and 503 unchanged). The e2e checks that assert "Too many runs were started in a short time" are unchanged.
+- Why: review plan task B9 (open finding R-3).
+- Affects: a visitor who hits the upload cap now sees why (too many files at once) instead of "too many runs".

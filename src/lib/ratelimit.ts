@@ -19,6 +19,7 @@
  * address (same buckets as the limiter) and in all.
  */
 import { CONFIG, ENV } from "./config";
+import { UPLOAD_BUSY_PREFIXES } from "./types";
 
 export interface RateLimitResult {
   ok: boolean;
@@ -282,8 +283,8 @@ export function beginUpload(ip: string): UploadSlot {
       ok: false,
       retryAfterSec: wait,
       message: ipFull
-        ? `Your address is already sending ${perIpCap} files. Try again in ${describeWait(wait)}.`
-        : `The server is receiving too many files at once. Try again in ${describeWait(wait)}.`,
+        ? `${UPLOAD_BUSY_PREFIXES[0]} ${perIpCap} files. Try again in ${describeWait(wait)}.`
+        : `${UPLOAD_BUSY_PREFIXES[1]} at once. Try again in ${describeWait(wait)}.`,
       scope: ipFull ? "ip" : "global",
       release: NOTHING_TO_RELEASE,
     };

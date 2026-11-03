@@ -766,6 +766,9 @@ export interface ApiError {
   retryAfterSec?: number;
 }
 
+/** Openings of the upload-cap 429 texts (ratelimit.ts beginUpload); the start page shows those texts as they are (review round B9). */
+export const UPLOAD_BUSY_PREFIXES = ["Your address is already sending", "The server is receiving too many files"] as const;
+
 /** POST /api/runs -> 202 */
 export interface CreateRunResponse {
   runId: string;

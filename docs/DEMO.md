@@ -89,7 +89,7 @@ That is about 4.5 minutes plus the model's time. If the model is slow, keep step
 
 **"Exact same file already processed in run ..."** You ran that sample since the last reset. Reset, or use it: "the first guard is the file's fingerprint".
 
-**"Too many runs were started in a short time"** The limit is 10 runs per minute per address and `MAX_RUNS_PER_HOUR` overall. Wait the time shown, or raise `MAX_RUNS_PER_HOUR` for the day. The same words appear, with a 5-second wait, when too many uploads are in progress at once (2 per address, 16 in all).
+**"Too many runs were started in a short time"** The limit is 10 runs per minute per address and `MAX_RUNS_PER_HOUR` overall. Wait the time shown, or raise `MAX_RUNS_PER_HOUR` for the day. When too many uploads are in progress at once (2 per address, 16 in all) the page instead shows the server's own words with a 5-second wait: "Your address is already sending 2 files. Try again in 5 s." or "The server is receiving too many files at once. Try again in 5 s."
 
 **"The upload did not arrive within 60 s, so it was stopped."** (or, on some connections, "The server took too long to respond. Try again.") The connection is too slow for that file: the server stops any upload that has not arrived after 60 s, and a 10 MB file needs about 1.4 Mbit/s of upload bandwidth. Use a sample card, or a smaller PDF.
 

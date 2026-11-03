@@ -592,6 +592,7 @@ export interface ApiError {
     error: string;
     retryAfterSec?: number;
 }
+export declare const UPLOAD_BUSY_PREFIXES: readonly ["Your address is already sending", "The server is receiving too many files"]; // added in review round B9
 export interface CreateRunResponse {
     runId: string;
 }

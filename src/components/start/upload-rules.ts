@@ -5,7 +5,7 @@
  *
  * Client-safe: from src/lib this file imports only types.ts (types).
  */
-import type { SeedCounts } from "@/lib/types";
+import { UPLOAD_BUSY_PREFIXES, type SeedCounts } from "@/lib/types";
 
 /** The upload limit. Mirrors CONFIG.maxFileBytes (10 MB); config.ts is server-only, so the number is repeated here. */
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -87,11 +87,13 @@ export interface Failure {
 
 /**
  * The message under the upload zone or the sample cards when POST /api/runs failed.
- * 429 names the wait (from retryAfterSec), 413 names the limit, a network failure keeps api.ts's own wording,
+ * 429 names the wait (from retryAfterSec) or, for an upload-cap refusal, shows the server's own text; 413 names the limit, a network failure keeps api.ts's own wording,
  * and any other 4xx shows what the server said.
  */
 export function startFailureMessage(failure: Failure): string {
   if (failure.status === 429) {
+    // The upload-cap refusals say why (too many files at once); only the run rate limit is "too many runs" (review round B9).
+    if (UPLOAD_BUSY_PREFIXES.some((p) => failure.error.startsWith(p))) return failure.error;
     return `Too many runs were started in a short time. Please wait ${describeWait(failure.retryAfterSec)} and try again.`;
   }
   if (failure.status === 413) return `That file is larger than ${MAX_UPLOAD_LABEL}. Choose a smaller PDF.`;

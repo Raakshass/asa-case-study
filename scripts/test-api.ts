@@ -2421,6 +2421,34 @@ async function resetGroup(t: Check): Promise<void> {
     t.eq(rules.resetOutcomeOf({ status: 0, error: "Could not reach the server. Check your connection and try again." }).kind, "failed", "no response at all is a failure");
     t.eq(rules.resetOutcomeOf({ status: 500, error: "x" }).kind, "failed");
   });
+
+  await t.test("B9: an upload-cap 429 shows the server's own words; a rate-limit 429 still reads 'too many runs'", () => {
+    const rules = load<typeof import("../src/components/start/upload-rules")>("src/components/start/upload-rules");
+    const { beginUpload, uploadsInFlight } = limiter;
+    const wait = CONFIG.uploadsBusyRetryAfterSec;
+    t.eq(uploadsInFlight(), { total: 0, ips: 0 }, "nothing in progress before the test");
+    // the real refusals of beginUpload: their text reads exactly as before the change, and the start page shows it as it is
+    const held = Array.from({ length: CONFIG.maxUploadsInFlightPerIp }, () => beginUpload("198.51.100.91"));
+    const ipFull = beginUpload("198.51.100.91");
+    if (ipFull.ok) return t.fail("one more upload from a full address must be refused");
+    t.eq(ipFull.message, `Your address is already sending ${CONFIG.maxUploadsInFlightPerIp} files. Try again in ${wait} s.`);
+    t.eq(rules.startFailureMessage({ status: 429, error: ipFull.message, retryAfterSec: ipFull.retryAfterSec }), ipFull.message, "the per-address refusal is shown as the server worded it");
+    for (const slot of held) slot.release();
+    const many = Array.from({ length: CONFIG.maxUploadsInFlight }, (_, i) => beginUpload(`198.51.100.${100 + i}`));
+    const globalFull = beginUpload("198.51.100.250");
+    if (globalFull.ok) return t.fail("one more upload when the server is full must be refused");
+    t.eq(globalFull.message, `The server is receiving too many files at once. Try again in ${wait} s.`);
+    t.eq(rules.startFailureMessage({ status: 429, error: globalFull.message, retryAfterSec: globalFull.retryAfterSec }), globalFull.message, "the server-wide refusal is shown as the server worded it");
+    for (const slot of many) slot.release();
+    t.eq(uploadsInFlight(), { total: 0, ips: 0 }, "everything given back");
+    // the rate limit keeps the start page's own sentence, whatever text the server sent
+    t.eq(rules.startFailureMessage({ status: 429, error: "Too many requests", retryAfterSec: 30 }), "Too many runs were started in a short time. Please wait 30 seconds and try again.");
+    t.eq(rules.startFailureMessage({ status: 429, error: "Note: Your address is already sending 2 files.", retryAfterSec: 7 }), "Too many runs were started in a short time. Please wait 7 seconds and try again.", "only a text that opens with the server's words counts");
+    t.eq(rules.startFailureMessage({ status: 429, error: "", retryAfterSec: undefined }), "Too many runs were started in a short time. Please wait a moment and try again.");
+    // other statuses are unchanged
+    t.eq(rules.startFailureMessage({ status: 413, error: "x" }), "That file is larger than 10 MB. Choose a smaller PDF.");
+    t.includes(rules.startFailureMessage({ status: 503, error: "x" }), "HTTP 503");
+  });
 }
 
 /* ================================================================================================
