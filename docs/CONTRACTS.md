@@ -27,7 +27,7 @@ Written 2026-11-03 by the contracts step, after Phase 0. This file fixes the mod
 | `src/lib/extract.ts`, `src/lib/extract-mock.ts`, `scripts/eval-extract.ts`, `docs/eval-extract.md` (optional results) | **Phase 2** | Extraction. Constants and `getExtractor`/`getSuggestPo` are already final |
 | `src/lib/normalize.ts`, `src/lib/rules.ts`, `scripts/checks/business.ts` | **Phase 3** | `normalizeInvoiceNumber` and `VENDOR_SUFFIXES` are already final |
 | `src/lib/pdf.ts`, `src/lib/guardrails.ts`, `scripts/checks/guardrails.ts` | **Phase 4** | In `pdf.ts` only `validateUpload` is a stub; the primitives are tested and may be refined, not re-signed |
-| `src/lib/pipeline.ts`, `src/lib/ratelimit.ts`, `src/app/api/**`, `src/instrumentation.ts` (optional), `next.config.ts` | **Phase 5** | `defaultPipelineDeps` is already final |
+| `src/lib/pipeline.ts`, `src/lib/ratelimit.ts`, `src/app/api/**`, `src/instrumentation.ts` (optional), `next.config.mjs` (it was `next.config.ts` until commit db01491; same settings) | **Phase 5** | `defaultPipelineDeps` is already final |
 | `src/app/**` except `src/app/api/**`, `src/components/**` (new files; `src/components/ui/*` are shadcn-generated, add more with the shadcn CLI) | **Phase 6** | UI |
 | `IMPLEMENTATION_PLAN.md`, `CLAUDE.md`, `docs/CONTRACTS.md`, `docs/notes-*.md`, `package.json`, `package-lock.json`, `.env*`, `tsconfig.json` | orchestrator | Read-only for phases |
 | `ASSUMPTIONS.md`, `docs/CONTRACT_CHANGES.md` | everyone, append-only | Only add your own bullets / entries |
@@ -173,7 +173,7 @@ Suggested titles: Happy path · Small price variance · Split-PO over-billing ·
 | 3 | extract | `ex = await deps.extract(bytes, { isImageOnly })` | `checkExtract(ex)` (rules.ts) | `ex.data` |
 | 4 | validate | `grounding = isImageOnly ? null : groundExtraction(ex.data, buildGroundingText(textItems))` | `checkValidate(ex.data, grounding, now)` | - |
 | 5 | normalize | `normalized = normalizeInvoice(ex.data, snapshot.vendors)` (normalize.ts) | `checkNormalize(normalized)` | normalized |
-| 6 | vendor | - | `checkVendor(ex.data, normalized, snapshot)` -> `VendorOutcome` | `vendor.vendor` |
+| 6 | vendor | `printed = isImageOnly ? null : printedBankAccounts(buildGroundingText(textItems), snapshot.vendors.map((v) => v.bank_account))` (guardrails.ts; fix round SEC-2) | `checkVendor(ex.data, normalized, snapshot, printed)` -> `VendorOutcome` | `vendor.vendor` |
 | 7 | po_match | - | `await checkPoMatch(ex.data, normalized, vendor.vendor, snapshot, deps.suggestPo)` -> `PoMatchOutcome` | poMatch |
 | 8 | amounts | - | `checkAmounts(ex.data, normalized, poMatch, snapshot)` -> `AmountsOutcome` | - |
 | 9 | duplicate | - | `checkDuplicate(ex.data, normalized, vendor.vendor, snapshot)` -> `DuplicateOutcome` | - |
@@ -205,10 +205,15 @@ Suggested titles: Happy path · Small price variance · Split-PO over-billing ·
 6. **Confidence** outside 0..1 is invalid output (never clamped). `suspicious_content` items may be up to 500 chars.
 7. **Interrupted runs** (startup recovery): `decision` NULL, running step `error`, pending steps `skipped`, `next_action "Re-run this invoice."`.
 8. **Next action** for a non-invoice `document_type` routes by document type even if required fields are missing (#10 -> statement handling, not manual entry).
+9. **Duplicate check on other documents** (fix round, DEC-3): stage 9 is `skipped` for a statement, receipt or other non-invoice document (validate already holds it). A credit note (its document type, or a negative amount) is compared only with earlier credits, an invoice only with earlier charges. The invoices table keeps no document type, so an earlier row's class is the sign of its subtotal (else its total); a row without amounts matches either.
+10. **Look-alike invoice numbers** (fix round, DEC-2): after the hard rule, a number of the same vendor that differs from an earlier APPROVE or HOLD one only by look-alike characters (O for 0, I or L for 1) or by zero padding is a soft duplicate: fail/hold, `kind "soft"`, detail `lookalike: true`, whatever the amount and the date. Never a reject (the match is fuzzy); `invoice_number_norm` is unchanged.
+11. **Unknown vendor on a non-invoice document** (fix round, DRILL-1): a vendor that is not in the master is warn/info (the reason names it and says it is not routed to onboarding), and a document that names no vendor skips stage 6; validate's "not an invoice" HOLD decides. A KNOWN vendor that is not approved still rejects for onboarding, whatever the document type.
+12. **Units and value per PO line** (fix round, DEC-1): stage 8 also sums the invoice lines that pair with one PO line. More units than the line orders (beyond the 2% tolerance; a lump-sum line of quantity 1 is judged on its amount only) or an amount more than 2% above the line's amount is fail/hold (detail `line_totals`, `line_totals_within_tolerance`).
+13. **Printed bank accounts** (fix round SEC-2, widened in fix round 2 SEC-2-R1): stage 6 also compares the account numbers `printedBankAccounts` finds in the visible text of a text PDF (none for a scan). One that is not the vendor's account on file is a bank mismatch (fail/hold, the plan's reason), even when the model reported no account. The scan is best effort: what it misses and the innocent numbers it can hold are listed in ASSUMPTIONS.md (SEC-2 residuals).
 
 ## 5. Module signatures (generated from the code)
 
-**Status (2026-11-03):** every module below is implemented. The blocks are the contract as it was frozen at the foundation step; no signature in them has changed. What was added later (extra exports, new `CONFIG` keys, behaviour changes) is logged per phase in `docs/CONTRACT_CHANGES.md`; where an export is not listed here, its JSDoc in the source is the reference. Reading both is the current contract.
+**Status (2026-11-03, after fix round 2):** every module below is implemented. The blocks are the contract as it was frozen at the foundation step, plus the later additions that `docs/CONTRACT_CHANGES.md` asked to be written in here, each marked with a comment: the `CONFIG` keys, `findVendorMatches`, `checkVendor`'s optional 4th parameter, `printedBankAccounts`, and the additive exports of `pipeline.ts` and `ratelimit.ts` (including `checkRateLimit`'s optional 3rd parameter). Every addition is optional or additive, so each earlier call still compiles. Other additive exports (for example in `pdf.ts` and `extract.ts`) and every behaviour change are logged per phase in `docs/CONTRACT_CHANGES.md`; where an export is not listed here, its JSDoc in the source is the reference. Reading both is the current contract.
 
 `InvoiceExtraction` (the zod-inferred type, written out):
 ```ts
@@ -763,6 +768,10 @@ export declare const CONFIG: {
     readonly maxTaxRate: 0.1;          // added at the Phase 1-4 integration: tax above this share of the pre-tax amount (+ cents) -> HOLD
     readonly stageTimeoutMs: 300000;   // added at the Phase 5-6 integration: a stage that has not settled by then is an error step
     readonly resetIdleWaitMs: 15000;   // added at the Phase 5-6 integration: POST /api/reset waits this long for the queue to go idle
+    readonly bodyReceiveTimeoutMs: 60000;   // added in fix round 2 (SEC-6): total time to receive a POST /api/runs body, else 408
+    readonly maxUploadsInFlightPerIp: 2;    // added in fix round 2 (SEC-6): uploads in progress per address, else 429
+    readonly maxUploadsInFlight: 16;        // added in fix round 2 (SEC-6): uploads in progress in all, else 429
+    readonly uploadsBusyRetryAfterSec: 5;   // added in fix round 2 (SEC-6): Retry-After of that 429
 };
 export type MockMode = "off" | "truth" | "fooled";
 export declare const ENV: {
@@ -922,6 +931,7 @@ export declare function checkScreen(screen: ScreenResult): StepResult;
 export declare function buildGroundingText(items: readonly TextItem[], maxPt?: number): string;
 export declare function tokenize(text: string): string[];
 export declare function groundExtraction(extraction: InvoiceExtraction, visible: string | readonly string[]): GroundingResult;
+export declare function printedBankAccounts(text: string, accountsOnFile?: readonly (string | null)[]): string[]; // added in the fix round (SEC-2), widened in fix round 2 (SEC-2-R1)
 ```
 
 ### `src/lib/extract.ts` (owner: Phase 2; real; additive exports are in its JSDoc and docs/CONTRACT_CHANGES.md)
@@ -968,7 +978,7 @@ export declare function checkIngest(upload: UploadValidation, fileHash: string, 
 export declare function checkExtract(result: ExtractResult): StepResult;
 export declare function checkValidate(extraction: InvoiceExtraction, grounding: GroundingResult | null, now: Date): StepResult;
 export declare function checkNormalize(normalized: NormalizedInvoice): StepResult;
-export declare function checkVendor(extraction: InvoiceExtraction, normalized: NormalizedInvoice, snapshot: Snapshot): VendorOutcome;
+export declare function checkVendor(extraction: InvoiceExtraction, normalized: NormalizedInvoice, snapshot: Snapshot, printedAccounts?: readonly string[] | null): VendorOutcome; // 4th parameter added in the fix round (SEC-2)
 export declare function checkPoMatch(extraction: InvoiceExtraction, normalized: NormalizedInvoice, vendor: Vendor | null, snapshot: Snapshot, suggestPo: SuggestPoFn): Promise<PoMatchOutcome>;
 export declare function checkAmounts(extraction: InvoiceExtraction, normalized: NormalizedInvoice, poMatch: PoMatchOutcome, snapshot: Snapshot): AmountsOutcome;
 export declare function checkDuplicate(extraction: InvoiceExtraction, normalized: NormalizedInvoice, vendor: Vendor | null, snapshot: Snapshot): DuplicateOutcome;
@@ -1012,11 +1022,17 @@ export interface RateLimitResult {
     message: string;
     scope: "ip" | "global" | null;
 }
-export declare function checkRateLimit(ip: string, now?: number): RateLimitResult;
+export declare function checkRateLimit(ip: string, now?: number, opts?: RateLimitOptions): RateLimitResult; // opts added in fix round 2 (SEC-6)
 export declare function resetRateLimits(): void;
 // additive (Phase 5 / integration, docs/CONTRACT_CHANGES.md):
-export declare function refundGlobalSlot(at: number): void; // gives back the hourly slot an allowed call recorded at `at`
+export declare function refundGlobalSlot(at: number): void; // gives back the hourly slot that an allowed call (checkRateLimit or takeGlobalSlot) recorded at `at`
 export declare function rateLimiterSize(): { ips: number; global: number }; // what the limiter remembers (tests)
+// additive (fix round 2, SEC-6: uploads that stall or crawl; docs/CONTRACT_CHANGES.md):
+export interface RateLimitOptions { recordGlobal?: boolean } // false: the hourly cap is only checked, no slot taken (the per-address call is still recorded)
+export declare function takeGlobalSlot(now?: number): RateLimitResult; // takes one hourly slot right before createRun, checking the cap again
+export interface UploadSlot extends RateLimitResult { release(): void } // release() is idempotent
+export declare function beginUpload(ip: string): UploadSlot; // caps uploads in progress per address and in all; a refusal records nothing
+export declare function uploadsInFlight(): { total: number; ips: number }; // uploads in progress (tests, diagnostics)
 ```
 
 ### `scripts/checks/harness.ts` (owner: contracts; real)
@@ -1061,12 +1077,12 @@ export declare function openSeededMemoryDb(seedDir?: string): DB;
 ### Behaviour notes per module (beyond the JSDoc in the source)
 
 - **pdf.ts / `validateUpload`** (Phase 4): never throws; order and exact reasons are in its JSDoc. `outcome` is `"hold"` only for `encrypted`. On success it returns the text items parsed once, reused by stages 2 and 4. `getTextItems` copies its input (pdf.js detaches buffers); keep that.
-- **guardrails.ts** (Phase 4): scan the **joined** text (NFKC, whitespace collapsed) with `CONFIG.injectionPatterns`; tiny text = consecutive items `< CONFIG.tinyTextMaxPt` with `>= CONFIG.tinyTextMinWords` words; grounding text replaces **every** item under 3pt with a space; identifiers compare with `normId`, amounts numerically within `CONFIG.groundingAmountTolerance`, whole tokens only.
+- **guardrails.ts** (Phase 4): scan the **joined** text (NFKC, whitespace collapsed) with `CONFIG.injectionPatterns`; tiny text = consecutive items `< CONFIG.tinyTextMaxPt` with `>= CONFIG.tinyTextMinWords` words; grounding text replaces **every** item under 3pt with a space; identifiers compare with `normId`, amounts numerically within `CONFIG.groundingAmountTolerance`, whole tokens only. An injection-hit quote starts at the sentence of its first match when that sentence starts at most 20 characters earlier, else at the match (fix round 2, UI-6). `printedBankAccounts` (stage 6): four readings, linear in the text, at most 10 values of at most 40 characters with at least 4 digits each; its JSDoc lists them, ASSUMPTIONS.md what it misses.
 - **extract.ts** (Phase 2): reads `OPENROUTER_API_KEY` itself; missing key -> `{ ok: false, kind: "billing_auth", message: "OPENROUTER_API_KEY is not set" }` with no network call; missing `EXTRACT_MODEL` -> `kind: "unreadable"`. Models = `opts.models ?? [ENV.extractModel, ENV.fallbackModel].filter(Boolean)`. Request body, engines, error classes, retry and fallback exactly as plan section 5 / `docs/notes-openrouter.md` sections 3-5 (its `auth_billing` is `billing_auth` here). `rawOutput` = `choices[0].message.content` only. `ExtractAttempt` records `finishReason` and `reasoningTokens` for `eval-extract`.
 - **extract-mock.ts** (Phase 2): see JSDoc. Never used unless `EXTRACT_MOCK` is set; `model` is always `"mock"`. It must not import `extract.ts` (which imports it); use `samples.ts`, `pdf.ts` (`sha256`) and `types.ts`.
 - **normalize.ts / rules.ts** (Phase 3): pure. Use `normId` for every identifier comparison and `formatUsd` for every amount in a reason. Reason texts must contain the phrases in section 3.3.
 - **pipeline.ts** (Phase 5): section 4. The serial chain lives on `globalThis` (survives dev HMR). `enqueue` never rejects. `runPipeline` validates `run.file_hash` with `SHA256_HEX_RE` before building a path (`uploadPath()` in config.ts does it). Each stage runs within `CONFIG.stageTimeoutMs`; a timeout is an `error` step (log error `StageTimeout`) and the run still reaches `decide` (the stuck work itself cannot be cancelled, its late result is dropped). The `decide` step, the run result and the invoices row are written in ONE transaction. `runs.security_flag` is set as soon as the screen fails or the extraction reports suspicious content (decide writes the final value, a superset).
-- **ratelimit.ts** (Phase 5): see JSDoc; per-IP 10 per rolling minute, global `ENV.maxRunsPerHour` per rolling hour. Client IP: `x-real-ip`, else the last `x-forwarded-for` entry, else `"unknown"` (Railway header behaviour unverified; both headers are client-chosen when no proxy sets them, the global cap is the backstop). IPv6 is bucketed per /64, an IPv4-mapped IPv6 address counts as IPv4, a port after an IPv4 address is dropped. Only a request that creates a run spends the hourly slot (`POST /api/runs` calls `refundGlobalSlot` otherwise).
+- **ratelimit.ts** (Phase 5): see JSDoc; per-IP 10 per rolling minute, global `ENV.maxRunsPerHour` per rolling hour. Client IP: `x-real-ip`, else the last `x-forwarded-for` entry, else `"unknown"` (Railway header behaviour unverified; both headers are client-chosen when no proxy sets them, the global cap is the backstop). IPv6 is bucketed per /64, an IPv4-mapped IPv6 address counts as IPv4, a port after an IPv4 address is dropped. Only a request that creates a run spends the hourly slot: `POST /api/runs` only reads the hourly cap at the door (`{ recordGlobal: false }`), takes the slot with `takeGlobalSlot` once the body is complete, right before `createRun`, and calls `refundGlobalSlot` if no run is created after all (fix round 2, SEC-6). `beginUpload` caps uploads in progress: `CONFIG.maxUploadsInFlightPerIp` per address (same buckets) and `CONFIG.maxUploadsInFlight` in all; uploads in progress are live requests, so `resetRateLimits()` does not clear them.
 - **db.ts**: call `getDb()` lazily inside handlers, never at module top level. Pages and routes that read the DB export `const dynamic = "force-dynamic"` so `next build` never opens it.
 
 ## 6. Checks (`scripts/check.ts`)
@@ -1087,7 +1103,7 @@ Every handler: `export const runtime = "nodejs"; export const dynamic = "force-d
 
 | Method + route | Input | Success | Errors |
 |---|---|---|---|
-| `POST /api/runs` | multipart `file` (any type; ingest decides) **or** JSON `{ sample }` with `sample` in `SAMPLE_FILES` (`SampleFileSchema`) | `202 CreateRunResponse` `{ runId }`, immediately | `400` bad body / unknown sample; `413` file > `CONFIG.maxFileBytes` (no run created); `429` from `checkRateLimit` with `Retry-After` header + `retryAfterSec` |
+| `POST /api/runs` | multipart `file` (any type; ingest decides) **or** JSON `{ sample }` with `sample` in `SAMPLE_FILES` (`SampleFileSchema`) | `202 CreateRunResponse` `{ runId }`, immediately | `400` bad body / unknown sample; `404` the sample's PDF is missing on the server; `408` the body did not arrive whole within `CONFIG.bodyReceiveTimeoutMs` (60 s in all, not idle time; JSON or upload; no run created, temp file removed; fix round 2); `413` file > `CONFIG.maxFileBytes` (no run created); `429` with `Retry-After` header + `retryAfterSec`, from `checkRateLimit` (10 per address per minute, or the hourly cap, at the door), from `takeGlobalSlot` (the hour filled up while the body arrived) or from `beginUpload` (uploads in progress: `CONFIG.maxUploadsInFlightPerIp` per address, `CONFIG.maxUploadsInFlight` in all; `Retry-After: 5`; counted nowhere, body never read) |
 | `GET /api/runs?decision=&limit=` | `decision` in `APPROVE \| HOLD \| REJECT \| security` (optional), `limit` 1..200 (default 50) | `200 RunsListResponse` `{ runs: RunListItem[], kpis: DashboardKpis }`, newest first; kpis over all runs | `400` |
 | `GET /api/runs/:id` | `id` must pass `z.uuid()` | `200 RunDetail` (steps ordered by idx; `is_history` runs have none) | `400`, `404` |
 | `GET /api/files/:hash` (and `HEAD`: same headers, no body) | `hash` must match `SHA256_HEX_RE` | `200` PDF bytes; `Content-Type: application/pdf`, `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600, immutable` | `400`, `404` |
@@ -1095,9 +1111,9 @@ Every handler: `export const runtime = "nodejs"; export const dynamic = "force-d
 | `GET /api/master` | - | `200 MasterResponse` (banks via `maskAccount`, balances via `poBalance`) | - |
 | `POST /api/reset` | header `x-reset-token` | `200 ResetResponse`; waits for the queue to go idle for at most `CONFIG.resetIdleWaitMs`, then, on the pipeline's own chain (`runExclusive`), runs `seedDatabase(getDb())` and deletes `uploads/*.pdf` whose names match the hash pattern (it never clears the rate limiter) | `403` unless `ENV.demoResetEnabled` and `ENV.demoResetToken` is non-null and equals the header (timing-safe compare) |
 
-POST flow: rate limit -> read bytes (sample: `samplePdfPath()`; upload: the multipart body is streamed to `uploads/.incoming-<uuid>.tmp`, counted as it arrives, and parsed one upload at a time) -> `sha256` -> write `uploads/<hash>.pdf` if absent (temp file + rename) -> `createRun(db, { fileName: sanitizeDisplayName(name) or the sample name, fileHash })` -> `enqueue(runId)` (not awaited) -> 202. Only a request that ends in a 202 spends the `MAX_RUNS_PER_HOUR` slot it took; every other outcome refunds it (the per-IP window still counts).
+POST flow (fix round 2, SEC-6): (multipart only) a place among the uploads in progress (`beginUpload`: `CONFIG.maxUploadsInFlightPerIp` per address, `CONFIG.maxUploadsInFlight` in all; else 429, counted nowhere, body not read) -> rate limit (`checkRateLimit(ip, now, { recordGlobal: false })`: the per-address call is recorded, the hourly cap only read) -> read the body within `CONFIG.bodyReceiveTimeoutMs`, else 408 (sample: the JSON body, then `samplePdfPath()`; upload: the multipart body is streamed to `uploads/.incoming-<uuid>.tmp`, counted as it arrives, and parsed one upload at a time) -> take the hourly slot (`takeGlobalSlot`, the cap checked again; 429 if the hour filled up meanwhile) -> `sha256` -> write `uploads/<hash>.pdf` if absent (temp file + rename) -> `createRun(db, { fileName: sanitizeDisplayName(name) or the sample name, fileHash })` -> `enqueue(runId)` (not awaited) -> 202. Only a request that ends in a 202 spends a `MAX_RUNS_PER_HOUR` slot: the slot is taken only once the body is complete and given back on any later failure (the per-IP window still counts every request that passed the door). An upload's place is given back when its request is answered.
 
-UI notes (Phase 6): poll `GET /api/runs/:id` every 400 ms until `status` is `done` or `error` (stop on unmount); dashboard every 3 s. Stage list from `STAGES`. Grounded column from `steps[key="validate"].detail.grounding.fields` (`null` -> "–"). Shield banner when `security_flag`; quote `steps[key="screen"].detail.injectionHits` / `hiddenText` and `extraction.suspicious_content` as plain text. `is_history` runs show "Pre-loaded history record" instead of the stepper. Confidence chips via `confidenceTone()`, money via `formatUsd()`. Client components may import **only** `src/lib/types.ts` and `src/lib/format.ts` (everything else is server-only).
+UI notes (Phase 6): poll `GET /api/runs/:id` every 400 ms until `status` is `done` or `error` (stop on unmount); dashboard every 3 s. Stage list from `STAGES`. Grounded column from `steps[key="validate"].detail.grounding.fields` (`null` -> "–"). Shield banner when `security_flag`; quote `steps[key="screen"].detail.injectionHits` / `hiddenText` and `extraction.suspicious_content` as plain text. `is_history` runs show "Pre-loaded history record" instead of the stepper. Confidence chips via `confidenceTone()`, money via `formatUsd()`. Client components may import **only** `src/lib/types.ts` and `src/lib/format.ts` (everything else is server-only). Fix round 2 (display only; no API change): the decision card of a HOLD or REJECT lists the reasons that come only from notes (a `warn` step with severity info or none, a `pass` or `skipped` step; matched by exact reason text) under "Also noted"; on a flagged run it folds the screen and extract reasons whose quotes the banner shows into one entry without the quote. The PDF panel sends `HEAD /api/files/:hash` first and shows "The stored file is no longer available" on a 404.
 
 ## 8. Conventions
 
@@ -1123,10 +1139,13 @@ OpenRouter (no key was available, so no chat call was made):
 PDF (verified on Node 20 with real files, with these limits):
 - White, near-white or invisible (`3 Tr`) text at normal size is invisible to the size heuristic; colour needs `getOperatorList()` on Node >= 22 (not implemented).
 - Text outside the page box is dropped by pdf.js (fails safe for grounding).
-- Railway-specific Node pinning and proxy headers are unverified.
+
+Deploy (Phase 8; the Docker image has never been built and Railway has never been tried):
+- Node is pinned by the Dockerfile's base image `node:22-bookworm-slim` (and by `package.json` `engines.node >= 22`, which npm only warns about on Node 20).
+- Railway's documentation lists `X-Real-IP` "for identifying client's remote IP", which the rate limiter reads first; it does not say whether its edge overwrites a value the client sent (unverified).
 
 ## 10. Notes for later phases
 
 - **Phase 7**: the abuse tests in the plan map to: `.txt` renamed `.pdf` -> ingest REJECT "Not a PDF"; same file twice -> ingest REJECT "Exact same file already processed in run <id>"; 12 rapid uploads -> 429 after 10; invalid `EXTRACT_MODEL` -> `rejected` -> fallback; both invalid -> extract `error` -> HOLD.
-- **Phase 8**: a Railway volume mounted at `/app/data` would hide the image's `data/seed`, `data/samples` and `data/fixtures` (read from `<root>/data`); mount it elsewhere (e.g. `/app/storage`) with `DATA_DIR=/app/storage`. `getDb()` seeds an empty database on first use. Pin Node 22 LTS (`engines.node >= 22`); Node 20 is EOL.
+- **Phase 8**: a Railway volume mounted at `/app/data` would hide the image's `data/seed`, `data/samples` and `data/fixtures` (read from `<root>/data`); mount it elsewhere (e.g. `/app/storage`) with `DATA_DIR=/app/storage`. `getDb()` seeds an empty database on first use. Pin Node 22 LTS (`engines.node >= 22`); Node 20 is EOL. Done (README, "Deploy on Railway"): the volume at `/app/storage` with `DATA_DIR=/app/storage`; the image runs as the `node` user, so the service sets `RAILWAY_RUN_UID=0` (Railway mounts volumes as root); healthcheck path `/api/master` (it opens the database, while `/api/samples` answers 200 even when the database cannot be opened); no `railway.json` (Railway's Config as Code is deprecated and stops being read on 2026-12-01), so these are dashboard settings; `engines.node >= 22` and the image `node:22-bookworm-slim`.
 - The orchestrator may want to add one line to `CLAUDE.md` pointing agents at this file (the contracts step did not edit `CLAUDE.md`).
