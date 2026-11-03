@@ -1,4 +1,4 @@
-# Kept out of the Docker build context (see Dockerfile). The build needs package*.json, next.config.ts, tsconfig.json,
+# Kept out of the Docker build context (see Dockerfile). The build needs package*.json, next.config.mjs, tsconfig.json,
 # eslint.config.mjs, postcss.config.mjs, src/, scripts/ (next build type-checks them) and data/ (seed, samples,
 # fixtures); the runtime stage then copies only what `next start` needs.
 # Patterns are matched from the context root; **/ matches in every folder.

@@ -14,9 +14,9 @@
 #   (a safety regression), so it is copied explicitly below.
 # - Writable state (app.db, uploads/) lives in DATA_DIR=/app/storage, the volume mount point. Never mount a volume
 #   at /app/data: it would hide data/seed and data/samples.
-# - `next start` loads next.config.ts at boot and needs the `typescript` package for that; without it Next tries to
-#   `npm install typescript` at every start and exits when it cannot. So typescript is kept in the runtime image.
-#   (If next.config.ts becomes next.config.mjs, that COPY line can go; the config COPY takes either file.)
+# - The config is next.config.mjs on purpose: `next start` compiles a next.config.ts at boot and then needs the
+#   `typescript` package (without it Next 15 tries to `npm install typescript` at every start and exits when it
+#   cannot), so the runtime image would have to carry typescript. A plain .mjs needs nothing.
 # - The process runs as the unprivileged `node` user and cannot change the app files. Railway mounts volumes as root,
 #   so on Railway set the service variable RAILWAY_RUN_UID=0 (Railway's documented fix for non-root images).
 
@@ -50,7 +50,6 @@ ENV NODE_ENV=production \
     PORT=3000 \
     DATA_DIR=/app/storage
 COPY --from=prod-deps /app/node_modules ./node_modules
-COPY --from=deps /app/node_modules/typescript ./node_modules/typescript
 COPY --from=build /app/package.json /app/package-lock.json /app/next.config.* ./
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/data/seed ./data/seed

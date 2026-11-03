@@ -1,4 +1,4 @@
-import type { NextConfig } from "next";
+// @ts-check
 
 /** Baseline response headers on every route (no CSP yet). The PDF frame is same-origin, hence SAMEORIGIN. */
 const baselineHeaders = [
@@ -8,7 +8,8 @@ const baselineHeaders = [
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
 ];
 
-const nextConfig: NextConfig = {
+/** @type {import("next").NextConfig} */
+const nextConfig = {
   // Native module; must not be bundled by webpack.
   serverExternalPackages: ["better-sqlite3"],
   poweredByHeader: false,

@@ -24,7 +24,8 @@
 .DS_Store
 *.pem
 
-# debug
+# debug (a server log written into the repo root, e.g. `npm run start > server.log`, must never be committed)
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
