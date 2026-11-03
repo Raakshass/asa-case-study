@@ -57,6 +57,8 @@ export const CONFIG = {
 
   // ---- added at integration (docs/CONTRACT_CHANGES.md) ----
   maxTaxRate: 0.1, // demo tax rate (ASSUMPTIONS.md); tax above this share of the pre-tax amount (+ cents) -> HOLD
+  stageTimeoutMs: 300_000, // a pipeline stage that has not settled by then is an "error" step (-> HOLD); extract's own worst case is ~200 s (2 models x 2 attempts x 45 s + 429 waits)
+  resetIdleWaitMs: 15_000, // POST /api/reset waits this long for the queue to go idle, then takes its turn on the chain
 } as const;
 
 export type MockMode = "off" | "truth" | "fooled";

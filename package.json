@@ -10,6 +10,12 @@
     "seed": "tsx scripts/seed.ts",
     "gen": "tsx scripts/gen-invoices.ts",
     "check": "tsx scripts/check.ts",
+    "test:extract": "tsx scripts/test-extract.ts",
+    "test:api": "tsx scripts/test-api.ts",
+    "smoke": "tsx scripts/smoke-http.ts",
+    "e2e": "tsx scripts/e2e-browser.ts",
+    "check:static": "tsx scripts/check-static.ts",
+    "rehearse": "tsx scripts/rehearse.ts",
     "eval": "tsx scripts/eval-extract.ts",
     "typecheck": "tsc --noEmit"
   },

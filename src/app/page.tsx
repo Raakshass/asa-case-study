@@ -1,10 +1,42 @@
-export default function Home() {
+import type { Metadata } from "next";
+import Link from "next/link";
+import { Database, Upload } from "lucide-react";
+import { DashboardView } from "@/components/dashboard/dashboard-view";
+import { PageHeader } from "@/components/shared/page-header";
+import { Button } from "@/components/ui/button";
+
+export const metadata: Metadata = {
+  title: "Dashboard",
+};
+
+/**
+ * `/` Dashboard (plan section 9): the KPI row, the filter chips and the table of runs. The page itself is a
+ * static shell; DashboardView (a client component) loads and refreshes the data through GET /api/runs.
+ */
+export default function DashboardPage() {
   return (
-    <main className="mx-auto flex min-h-screen max-w-3xl flex-col justify-center gap-2 px-4">
-      <h1 className="text-2xl font-semibold">Invoice AP Agent</h1>
-      <p className="text-muted-foreground">
-        Scaffold ready. The dashboard is built in a later phase.
-      </p>
-    </main>
+    <>
+      <PageHeader
+        title="Dashboard"
+        description="Every invoice the agent has processed, newest first. The page refreshes by itself every few seconds."
+        actions={
+          <>
+            <Button asChild size="lg">
+              <Link href="/runs/new">
+                <Upload aria-hidden="true" />
+                New run
+              </Link>
+            </Button>
+            <Button asChild size="lg" variant="outline">
+              <Link href="/data">
+                <Database aria-hidden="true" />
+                Procurement data
+              </Link>
+            </Button>
+          </>
+        }
+      />
+      <DashboardView />
+    </>
   );
 }

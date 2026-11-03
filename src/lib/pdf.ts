@@ -157,9 +157,11 @@ const TEXT_WORKER_FILE = "pdf-text-worker.mjs";
 /** Heap cap of one text-parse worker. A 5-page invoice needs a few MB; a hostile file stops here, not at the machine's limit. */
 export const TEXT_WORKER_HEAP_MB = 256;
 /**
- * How much the process may grow (RSS) while one text read runs. pdf.js decodes content streams into buffers that
- * live outside the capped heap: in-process, a 157 KB operator flood grew the process by ~450 MB. Measured growth
- * for real files: under 50 MB (a 99,000-item text layer: 43 MB, including a worker start).
+ * How much the process may grow (RSS) because of one text read: the growth while it runs, minus what the main
+ * thread's own heap and external memory grew by meanwhile (other requests, uploads), see workerGrowthBytes. pdf.js
+ * decodes content streams into buffers that live outside the capped heap: in-process, a 157 KB operator flood grew
+ * the process by ~450 MB. Measured growth for real files: under 50 MB (a 99,000-item text layer: 43 MB, including a
+ * worker start).
  */
 export const TEXT_WORKER_MAX_GROWTH_MB = 256;
 const MEMORY_CHECK_MS = 50;
@@ -275,14 +277,31 @@ function readInProcess(buf: Uint8Array, limits: ReadLimits, abort: Abort): Promi
   return readPdfText(buf, limits, abort);
 }
 
+/** What the main thread itself holds: its V8 heap and its external memory (Buffers, ArrayBuffers, Blobs). */
+function mainThreadBytes(): number {
+  const m = process.memoryUsage();
+  return m.heapTotal + m.external;
+}
+
+/**
+ * How much of the process growth since the read started the worker caused. RSS is process-wide, so on its own it
+ * also counts what the main thread allocates meanwhile (an upload finishing costs it tens of MB): red team RT-PIPE-01,
+ * where eight uploads completing during one read got a valid invoice rejected as damaged. `process.memoryUsage()`
+ * fields other than rss refer to the CALLING thread only, so the main thread's own growth is taken off; memory it
+ * frees is never added back (RSS rarely shrinks when it does).
+ */
+function workerGrowthBytes(start: { rss: number; main: number }): number {
+  return process.memoryUsage.rss() - start.rss - Math.max(0, mainThreadBytes() - start.main);
+}
+
 /** One job on a worker: resolves with the items or rejects (limit, deadline, crash); the worker is kept only when healthy. */
 function readOnWorker(worker: Worker, buf: Uint8Array, limits: ReadLimits, abort: Abort): Promise<{ items: TextItem[]; pageCount: number }> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
-    const baseline = process.memoryUsage.rss();
+    const start = { rss: process.memoryUsage.rss(), main: mainThreadBytes() };
     const memory = setInterval(() => {
-      if (process.memoryUsage.rss() - baseline > TEXT_WORKER_MAX_GROWTH_MB * 1024 * 1024) settle(false, () => reject(new PdfLimitError("size")));
+      if (workerGrowthBytes(start) > TEXT_WORKER_MAX_GROWTH_MB * 1024 * 1024) settle(false, () => reject(new PdfLimitError("size")));
     }, MEMORY_CHECK_MS);
     const settle = (keepWorker: boolean, finish: () => void) => {
       if (settled) return;

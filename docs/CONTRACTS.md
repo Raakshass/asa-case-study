@@ -208,6 +208,8 @@ Suggested titles: Happy path · Small price variance · Split-PO over-billing ·
 
 ## 5. Module signatures (generated from the code)
 
+**Status (2026-11-03):** every module below is implemented. The blocks are the contract as it was frozen at the foundation step; no signature in them has changed. What was added later (extra exports, new `CONFIG` keys, behaviour changes) is logged per phase in `docs/CONTRACT_CHANGES.md`; where an export is not listed here, its JSDoc in the source is the reference. Reading both is the current contract.
+
 `InvoiceExtraction` (the zod-inferred type, written out):
 ```ts
 type InvoiceExtraction = {
@@ -758,6 +760,9 @@ export declare const CONFIG: {
     readonly llmRetryAfterDefaultMs: 2000;
     readonly rateLimitPerIpPerMinute: 10;
     readonly maxDisplayNameChars: 100;
+    readonly maxTaxRate: 0.1;          // added at the Phase 1-4 integration: tax above this share of the pre-tax amount (+ cents) -> HOLD
+    readonly stageTimeoutMs: 300000;   // added at the Phase 5-6 integration: a stage that has not settled by then is an error step
+    readonly resetIdleWaitMs: 15000;   // added at the Phase 5-6 integration: POST /api/reset waits this long for the queue to go idle
 };
 export type MockMode = "off" | "truth" | "fooled";
 export declare const ENV: {
@@ -887,7 +892,7 @@ export declare function listSamples(truthDir?: string, samplesDir?: string): Sam
 export declare function samplePdfPath(file: SampleFile, samplesDir?: string): string;
 ```
 
-### `src/lib/pdf.ts` (owner: Phase 4; real primitives; validateUpload is a stub)
+### `src/lib/pdf.ts` (owner: Phase 4; real; additive exports are in its JSDoc and docs/CONTRACT_CHANGES.md)
 
 ```ts
 export type { TextItem, UploadValidation };
@@ -905,7 +910,7 @@ export interface UploadLimits {
 export declare function validateUpload(buf: Uint8Array, limits?: Partial<UploadLimits>): Promise<UploadValidation>;
 ```
 
-### `src/lib/guardrails.ts` (owner: Phase 4; stub)
+### `src/lib/guardrails.ts` (owner: Phase 4; real)
 
 ```ts
 export declare function joinText(items: readonly TextItem[]): string;
@@ -919,7 +924,7 @@ export declare function tokenize(text: string): string[];
 export declare function groundExtraction(extraction: InvoiceExtraction, visible: string | readonly string[]): GroundingResult;
 ```
 
-### `src/lib/extract.ts` (owner: Phase 2; constants + getExtractor/getSuggestPo real; extractInvoice/suggestPO stubs)
+### `src/lib/extract.ts` (owner: Phase 2; real; additive exports are in its JSDoc and docs/CONTRACT_CHANGES.md)
 
 ```ts
 export declare const PROMPT_VERSION = "extract-v1";
@@ -934,27 +939,28 @@ export declare function getExtractor(): ExtractFn;
 export declare function getSuggestPo(): SuggestPoFn;
 ```
 
-### `src/lib/extract-mock.ts` (owner: Phase 2; stub)
+### `src/lib/extract-mock.ts` (owner: Phase 2; real)
 
 ```ts
 export declare function mockExtractInvoice(pdf: Uint8Array, opts?: ExtractOptions): Promise<ExtractResult>;
 export declare function mockSuggestPO(input: SuggestPoInput): Promise<SuggestPoResult>;
 ```
 
-### `src/lib/normalize.ts` (owner: Phase 3; normalizeInvoiceNumber + VENDOR_SUFFIXES real; rest stubs)
+### `src/lib/normalize.ts` (owner: Phase 3; real)
 
 ```ts
 export declare const VENDOR_SUFFIXES: readonly ["inc", "llc", "ltd", "co", "corp", "pty"];
 export declare function normalizeInvoiceNumber(value: string | null): string | null;
 export declare function normalizeDate(value: string | null): string | null;
 export declare function normalizeVendorName(value: string | null): string | null;
+export declare function findVendorMatches(name: string | null, vendors: readonly Vendor[]): Vendor[]; // added at the Phase 1-4 integration
 export declare function resolveVendor(name: string | null, vendors: readonly Vendor[]): Vendor | null;
 export declare function normalizePoReference(value: string | null): string | null;
 export declare function normalizeCurrency(value: string | null): string | null;
 export declare function normalizeInvoice(extraction: InvoiceExtraction, vendors: readonly Vendor[]): NormalizedInvoice;
 ```
 
-### `src/lib/rules.ts` (owner: Phase 3; stub)
+### `src/lib/rules.ts` (owner: Phase 3; real)
 
 ```ts
 export type { SuggestPoFn };
@@ -970,7 +976,7 @@ export declare function decide(steps: StepMap, ctx: DecisionContext): DecideResu
 export declare function nextAction(decision: Decision, steps: StepMap, ctx: DecisionContext): string;
 ```
 
-### `src/lib/pipeline.ts` (owner: Phase 5; defaultPipelineDeps real; rest stubs)
+### `src/lib/pipeline.ts` (owner: Phase 5; real)
 
 ```ts
 export interface PipelineDeps {
@@ -991,9 +997,13 @@ export declare function createRun(db: DB, input: CreateRunInput): string;
 export declare function enqueue(runId: string, deps?: Partial<PipelineDeps>): Promise<void>;
 export declare function whenIdle(): Promise<void>;
 export declare function runPipeline(runId: string, deps?: Partial<PipelineDeps>): Promise<RunRow>;
+// additive (Phase 5 / integration, docs/CONTRACT_CHANGES.md):
+export declare function runExclusive<T>(task: () => Promise<T> | T): Promise<T>; // a task on the same serial chain (POST /api/reset wipes with it)
+export declare const PIPELINE_FILE_REASON = "The uploaded file could not be read, please upload it again";
+export declare const PIPELINE_FAILURE_REASON = "System error while processing this invoice, please re-run";
 ```
 
-### `src/lib/ratelimit.ts` (owner: Phase 5; stub)
+### `src/lib/ratelimit.ts` (owner: Phase 5; real)
 
 ```ts
 export interface RateLimitResult {
@@ -1004,6 +1014,9 @@ export interface RateLimitResult {
 }
 export declare function checkRateLimit(ip: string, now?: number): RateLimitResult;
 export declare function resetRateLimits(): void;
+// additive (Phase 5 / integration, docs/CONTRACT_CHANGES.md):
+export declare function refundGlobalSlot(at: number): void; // gives back the hourly slot an allowed call recorded at `at`
+export declare function rateLimiterSize(): { ips: number; global: number }; // what the limiter remembers (tests)
 ```
 
 ### `scripts/checks/harness.ts` (owner: contracts; real)
@@ -1052,8 +1065,8 @@ export declare function openSeededMemoryDb(seedDir?: string): DB;
 - **extract.ts** (Phase 2): reads `OPENROUTER_API_KEY` itself; missing key -> `{ ok: false, kind: "billing_auth", message: "OPENROUTER_API_KEY is not set" }` with no network call; missing `EXTRACT_MODEL` -> `kind: "unreadable"`. Models = `opts.models ?? [ENV.extractModel, ENV.fallbackModel].filter(Boolean)`. Request body, engines, error classes, retry and fallback exactly as plan section 5 / `docs/notes-openrouter.md` sections 3-5 (its `auth_billing` is `billing_auth` here). `rawOutput` = `choices[0].message.content` only. `ExtractAttempt` records `finishReason` and `reasoningTokens` for `eval-extract`.
 - **extract-mock.ts** (Phase 2): see JSDoc. Never used unless `EXTRACT_MOCK` is set; `model` is always `"mock"`. It must not import `extract.ts` (which imports it); use `samples.ts`, `pdf.ts` (`sha256`) and `types.ts`.
 - **normalize.ts / rules.ts** (Phase 3): pure. Use `normId` for every identifier comparison and `formatUsd` for every amount in a reason. Reason texts must contain the phrases in section 3.3.
-- **pipeline.ts** (Phase 5): section 4. The serial chain lives on `globalThis` (survives dev HMR). `enqueue` never rejects. `runPipeline` validates `run.file_hash` with `SHA256_HEX_RE` before building a path (`uploadPath()` in config.ts does it).
-- **ratelimit.ts** (Phase 5): see JSDoc; per-IP 10 per rolling minute, global `ENV.maxRunsPerHour` per rolling hour. Client IP: `x-real-ip`, else the last `x-forwarded-for` entry, else `"unknown"` (Railway header behaviour unverified).
+- **pipeline.ts** (Phase 5): section 4. The serial chain lives on `globalThis` (survives dev HMR). `enqueue` never rejects. `runPipeline` validates `run.file_hash` with `SHA256_HEX_RE` before building a path (`uploadPath()` in config.ts does it). Each stage runs within `CONFIG.stageTimeoutMs`; a timeout is an `error` step (log error `StageTimeout`) and the run still reaches `decide` (the stuck work itself cannot be cancelled, its late result is dropped). The `decide` step, the run result and the invoices row are written in ONE transaction. `runs.security_flag` is set as soon as the screen fails or the extraction reports suspicious content (decide writes the final value, a superset).
+- **ratelimit.ts** (Phase 5): see JSDoc; per-IP 10 per rolling minute, global `ENV.maxRunsPerHour` per rolling hour. Client IP: `x-real-ip`, else the last `x-forwarded-for` entry, else `"unknown"` (Railway header behaviour unverified; both headers are client-chosen when no proxy sets them, the global cap is the backstop). IPv6 is bucketed per /64, an IPv4-mapped IPv6 address counts as IPv4, a port after an IPv4 address is dropped. Only a request that creates a run spends the hourly slot (`POST /api/runs` calls `refundGlobalSlot` otherwise).
 - **db.ts**: call `getDb()` lazily inside handlers, never at module top level. Pages and routes that read the DB export `const dynamic = "force-dynamic"` so `next build` never opens it.
 
 ## 6. Checks (`scripts/check.ts`)
@@ -1077,12 +1090,12 @@ Every handler: `export const runtime = "nodejs"; export const dynamic = "force-d
 | `POST /api/runs` | multipart `file` (any type; ingest decides) **or** JSON `{ sample }` with `sample` in `SAMPLE_FILES` (`SampleFileSchema`) | `202 CreateRunResponse` `{ runId }`, immediately | `400` bad body / unknown sample; `413` file > `CONFIG.maxFileBytes` (no run created); `429` from `checkRateLimit` with `Retry-After` header + `retryAfterSec` |
 | `GET /api/runs?decision=&limit=` | `decision` in `APPROVE \| HOLD \| REJECT \| security` (optional), `limit` 1..200 (default 50) | `200 RunsListResponse` `{ runs: RunListItem[], kpis: DashboardKpis }`, newest first; kpis over all runs | `400` |
 | `GET /api/runs/:id` | `id` must pass `z.uuid()` | `200 RunDetail` (steps ordered by idx; `is_history` runs have none) | `400`, `404` |
-| `GET /api/files/:hash` | `hash` must match `SHA256_HEX_RE` | `200` PDF bytes; `Content-Type: application/pdf`, `X-Content-Type-Options: nosniff`, `Content-Disposition: inline` | `400`, `404` |
+| `GET /api/files/:hash` (and `HEAD`: same headers, no body) | `hash` must match `SHA256_HEX_RE` | `200` PDF bytes; `Content-Type: application/pdf`, `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600, immutable` | `400`, `404` |
 | `GET /api/samples` | - | `200 SampleListItem[]` (from `listSamples()`) | - |
 | `GET /api/master` | - | `200 MasterResponse` (banks via `maskAccount`, balances via `poBalance`) | - |
-| `POST /api/reset` | header `x-reset-token` | `200 ResetResponse`; awaits `whenIdle()`, `seedDatabase(getDb())`, deletes `uploads/*.pdf` whose names match the hash pattern | `403` unless `ENV.demoResetEnabled` and `ENV.demoResetToken` is non-null and equals the header (timing-safe compare) |
+| `POST /api/reset` | header `x-reset-token` | `200 ResetResponse`; waits for the queue to go idle for at most `CONFIG.resetIdleWaitMs`, then, on the pipeline's own chain (`runExclusive`), runs `seedDatabase(getDb())` and deletes `uploads/*.pdf` whose names match the hash pattern (it never clears the rate limiter) | `403` unless `ENV.demoResetEnabled` and `ENV.demoResetToken` is non-null and equals the header (timing-safe compare) |
 
-POST flow: rate limit -> read bytes (sample: `samplePdfPath()`) -> `sha256` -> write `uploads/<hash>.pdf` if absent (temp file + rename) -> `createRun(db, { fileName: sanitizeDisplayName(name) or the sample name, fileHash })` -> `enqueue(runId)` (not awaited) -> 202.
+POST flow: rate limit -> read bytes (sample: `samplePdfPath()`; upload: the multipart body is streamed to `uploads/.incoming-<uuid>.tmp`, counted as it arrives, and parsed one upload at a time) -> `sha256` -> write `uploads/<hash>.pdf` if absent (temp file + rename) -> `createRun(db, { fileName: sanitizeDisplayName(name) or the sample name, fileHash })` -> `enqueue(runId)` (not awaited) -> 202. Only a request that ends in a 202 spends the `MAX_RUNS_PER_HOUR` slot it took; every other outcome refunds it (the per-IP window still counts).
 
 UI notes (Phase 6): poll `GET /api/runs/:id` every 400 ms until `status` is `done` or `error` (stop on unmount); dashboard every 3 s. Stage list from `STAGES`. Grounded column from `steps[key="validate"].detail.grounding.fields` (`null` -> "–"). Shield banner when `security_flag`; quote `steps[key="screen"].detail.injectionHits` / `hiddenText` and `extraction.suspicious_content` as plain text. `is_history` runs show "Pre-loaded history record" instead of the stepper. Confidence chips via `confidenceTone()`, money via `formatUsd()`. Client components may import **only** `src/lib/types.ts` and `src/lib/format.ts` (everything else is server-only).
 
