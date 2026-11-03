@@ -82,6 +82,7 @@ Prices are USD per 1M tokens, shown as input / output.
 | `qwen/qwen3-vl-30b-a3b-instruct` | text, image | 262,144 / 16,384 | 0.15 / 0.60 | yes | yes | not supported |
 | `qwen/qwen3.8-flash` (vision, not VL-branded) | text, image, video | 1,000,000 / 131,072 | 0.15 / 0.47 | yes | yes | optional, default on |
 | `~google/gemini-flash-latest` | (alias) | – | reports 0.75 / 3.75, which matches 3.7 Flash | yes | – | – |
+| `nvidia/nemotron-3.5-super-vl:free` (free route, measured live 2026-11-03) | text, image, video (**no file**) | 1,000,000 / – | free (0 / 0); 20 requests a minute and 50 a day under $10 of purchased credit | yes (model level) | listed | optional, on by default: 1,200 to 2,300 reasoning tokens per invoice, which timed out 7 of 9 samples at 45 s; `effort: "none"` gives 0 and the app sends it |
 
 Rough cost per one-page invoice (not measured; `eval-extract` reports the real `usage.cost`): about 2–5k prompt tokens and 1–3k completion tokens give roughly $0.01–0.02 on Gemini 3.8 Flash and about $0.002 on Haiku 5.5. Qwen-VL costs about $0.004 plus the $0.002/page OCR fee on scans.
 
@@ -89,6 +90,7 @@ Rough cost per one-page invoice (not measured; `eval-extract` reports the real `
 - **EXTRACT_MODEL = `google/gemini-3.8-flash`.** It is the newest Gemini Flash, with no `-preview` suffix and no `expiration_date`. It reads PDFs natively, so the scanned #5 goes in unchanged with no OCR fee. Every endpoint supports `structured_outputs`, so `require_parameters` still leaves 3 standard endpoints (AI Studio, Vertex global, Vertex US) for provider failover. Its standard price matches 3.7 Flash. The trade-off is that reasoning can't be turned off (the minimum effort is `low`), which adds output tokens and latency. If 3.8's endpoints are flaky during eval, `google/gemini-3.7-flash` is a drop-in replacement at the same price with the same parameters.
 - **FALLBACK_MODEL = `anthropic/claude-haiku-5.5`.** It is a different provider family, so a Google outage or a Gemini-specific misread doesn't take out both models. It reads PDFs natively and supports structured outputs on 6 of its 10 endpoints (`require_parameters` filters out the rest). It is the cheapest candidate, **about 7.5x cheaper per token than Gemini 3.8 Flash**. If `eval-extract` shows it matches Gemini on #5 (scanned) and #9 (injection), swap the two env vars. No code change is needed.
 - **Qwen-VL for the eval table: `qwen/qwen3-vl-235b-a22b-instruct`.** It has no file input, so its PDFs go through `file-parser` (`mistral-ocr` for #5, `cloudflare-ai` for text PDFs). That makes it a test of a different pipeline: OCR first, then a vision/text model.
+- **Free route: `nvidia/nemotron-3.5-super-vl:free`** (not part of the plan's choice; added 2026-11-03 for a key with no credit). No native file input, so `file-parser` reads the PDF: `cloudflare-ai` (free) for a text PDF, `mistral-ocr` ($0.002 a page) for a scan, because `cloudflare-ai` returned no usable text on #5 (wrong vendor, number, date, subtotal, total and lines). Live results with `effort: "none"`: 10 of 10 returned, 9 of 10 right on the key fields, 2.8 to 22.6 s (11.8 s on average), #5 correct for $0.0020, #9 not manipulated. A call with the default reasoning answered "OK" in 3.4 to 20 s, and a zero-credit key could call it. The model sets `tax_inclusive` wrongly on some samples; see `reconcileTaxInclusive` in `src/lib/extract.ts`. A zero-credit account could make one `mistral-ocr` call (balance -$0.002) and still call free models afterwards.
 - Use **concrete slugs, not `~...-latest` aliases.** An alias can retarget without notice and silently remaps reasoning parameters. [latest-resolution]
 
 ---
@@ -225,7 +227,7 @@ export function buildExtractRequestBody(args: {
   model: string;
   pdf: Buffer; // bytes already validated by stage 1 (%PDF-, <= 10 MB, <= 5 pages)
   isImageOnly: boolean; // from the stage-2 screen (text layer < 20 chars)
-  systemPrompt: string; // PROMPT_VERSION "extract-v1"
+  systemPrompt: string; // PROMPT_VERSION "extract-v2" (v1 until 2026-11-03)
   engineOverride?: PdfEngine; // eval-extract only, e.g. force "mistral-ocr"
 }): ChatRequestBody {
   const profile = MODEL_PROFILES[args.model];

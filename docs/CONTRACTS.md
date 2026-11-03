@@ -937,13 +937,14 @@ export declare function printedBankAccounts(text: string, accountsOnFile?: reado
 ### `src/lib/extract.ts` (owner: Phase 2; real; additive exports are in its JSDoc and docs/CONTRACT_CHANGES.md)
 
 ```ts
-export declare const PROMPT_VERSION = "extract-v1";
+export declare const PROMPT_VERSION = "extract-v2"; // v2 (2026-11-03): the schema's tax_inclusive description was clarified
 export declare const EXTRACT_SYSTEM_PROMPT: string;
 export declare const EXTRACT_USER_TEXT = "Extract the document between the markers. <document> [attached file] </document>";
 export interface SuggestPoOptions {
     models?: readonly string[];
 }
 export declare function extractInvoice(pdf: Uint8Array, opts?: ExtractOptions): Promise<ExtractResult>;
+export declare function reconcileTaxInclusive(data: InvoiceExtraction): InvoiceExtraction; // added 2026-11-03: applied to every real model answer; true -> false (with a note) when subtotal + tax = total
 export declare function suggestPO(input: SuggestPoInput, opts?: SuggestPoOptions): Promise<SuggestPoResult>;
 export declare function getExtractor(): ExtractFn;
 export declare function getSuggestPo(): SuggestPoFn;
