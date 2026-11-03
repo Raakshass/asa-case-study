@@ -1443,7 +1443,9 @@ function queueForPayment(ctx: DecisionContext): string {
  * Fix round: an extraction that failed because the AI service was unavailable (billing/auth) says a re-run works
  * (DRILL-2); a vendor that could not be resolved on a non-invoice document no longer means manual entry, so the
  * document routes by its type (DRILL-1); more units or value on a PO line than ordered (DEC-1) and a tax-inclusive
- * price above the PO's (DEC-5) get their own amounts advice.
+ * price above the PO's (DEC-5) get their own amounts advice. A price above the PO's names "the extra units" only when a
+ * PO line is billed for more units than it orders (detail.line_totals[].quantity_over), not for a higher price on the
+ * ordered quantity (DEC-1-R1).
  */
 export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionContext): string {
   if (isSecurityFlagged(steps, ctx)) {
@@ -1516,6 +1518,7 @@ export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionCont
           price_within_tolerance?: unknown;
           unmatched_within_tolerance?: unknown;
           line_totals_within_tolerance?: unknown;
+          line_totals?: unknown;
           tax_inclusive?: unknown;
         }
       | undefined;
@@ -1537,7 +1540,11 @@ export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionCont
       // the prices include tax and the PO is pre-tax: the difference may be only the tax (DEC-5)
       return "Check the pre-tax prices: the invoice prices include tax and the PO is pre-tax. Ask the vendor for an invoice with prices before tax, or the buyer for a PO amendment if the higher price is agreed.";
     }
-    if (detail?.within_tolerance === true && totalsFailed) {
+    // A higher unit price on the full quantity also puts the line's value over the PO line, so "extra units" only when a
+    // PO line is billed for more units than it orders (DEC-1-R1).
+    const extraUnits =
+      Array.isArray(detail?.line_totals) && detail.line_totals.some((t) => typeof t === "object" && t !== null && (t as { quantity_over?: unknown }).quantity_over === true);
+    if (detail?.within_tolerance === true && totalsFailed && extraUnits) {
       return "Ask the vendor for a corrected invoice, or the buyer for a PO amendment if the higher unit price and the extra units are agreed.";
     }
     return detail?.within_tolerance === true

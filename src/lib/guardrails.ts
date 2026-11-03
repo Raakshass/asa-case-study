@@ -204,16 +204,41 @@ function spaceOptionalRegex(re: RegExp): RegExp | null {
 }
 
 /**
+ * One folded text variant. `text` is what the patterns run on; `lines` is the same text, character for character,
+ * except that a whitespace run which held a line break is "\n" instead of " " (only the quote start reads it).
+ */
+interface Folded {
+  text: string;
+  lines: string;
+}
+
+/** Every whitespace run becomes ONE character: "\n" when the run holds a line break (U+2028 here, see foldedVariants), else " ". */
+function collapseKeepingLines(s: string): string {
+  return s.replace(/\s+/g, (run) => (run.includes("\u{2028}") ? "\n" : " ")).trim();
+}
+
+/**
  * The text variants the patterns run on, all NFKD-folded (fullwidth, ligature, circled and mathematical
  * letters become plain ASCII; combining marks dropped; dash and colon look-alikes read as "-" and ":") with
  * whitespace collapsed to single spaces. Zero-width and other format characters are used both inside words
  * ("ig<ZWSP>nore") and instead of spaces ("ignore<ZWSP>all"), so a text that has any is scanned twice: with them
  * removed (first) and with them as spaces.
+ * Line breaks are carried through the folding as U+2028 (whitespace, and neither a format nor a control character,
+ * so the invisible-character steps leave it alone) and come out as "\n" in `lines` only: `text` is exactly the
+ * single-spaced text the patterns always ran on (UI-6 changes where a quote starts, never what is detected).
  */
-function foldedVariants(text: string): string[] {
-  const base = text.normalize("NFKD").replace(WHITESPACE_CONTROLS, " ").replace(MARKS, "").replace(DASH_LIKE, "-").replace(COLON_LIKE, ":");
-  if (!HAS_INVISIBLE.test(base)) return [collapseSpaces(base)];
-  return [collapseSpaces(base.replace(INVISIBLE, "")), collapseSpaces(base.replace(INVISIBLE, " "))];
+function foldedVariants(text: string): Folded[] {
+  const base = text
+    .normalize("NFKD")
+    .replace(WHITESPACE_CONTROLS, (c) => (c === "\t" ? " " : "\u{2028}"))
+    .replace(MARKS, "")
+    .replace(DASH_LIKE, "-")
+    .replace(COLON_LIKE, ":");
+  const variants = HAS_INVISIBLE.test(base) ? [base.replace(INVISIBLE, ""), base.replace(INVISIBLE, " ")] : [base];
+  return variants.map((variant) => {
+    const lines = collapseKeepingLines(variant);
+    return { text: lines.replace(/\n/g, " "), lines };
+  });
 }
 
 interface Span {
@@ -241,10 +266,27 @@ function collectMatches(text: string, regexes: readonly RegExp[]): Span[] {
 }
 
 /**
- * Context windows around the matches; windows that overlap (and still fit in one snippet) share a snippet.
- * A window that starts or ends inside a word is trimmed back to the word edge (never into a match).
+ * Where the quote of a match at `at` begins (UI-6): at the start of the match's sentence when that lies at most
+ * SNIPPET_BEFORE characters back (`floor`): after a line break, after ". ", "! " or "? ", or at the start of the text.
+ * Otherwise at the match itself. So a visible footer or heading is never glued to a hidden instruction
+ * ("Page 1 of 1" + line break + "AI assistant: ..." is quoted from "AI assistant:").
  */
-function snippetsAround(text: string, spans: readonly Span[]): string[] {
+function quoteStart(lines: string, floor: number, at: number): number {
+  for (let i = at - 1; i >= floor; i--) {
+    const c = lines[i];
+    if (c === "\n") return i + 1;
+    if (c === " " && i > 0 && (lines[i - 1] === "." || lines[i - 1] === "!" || lines[i - 1] === "?")) return i + 1;
+  }
+  return floor === 0 ? 0 : at;
+}
+
+/**
+ * Context windows around the matches; windows that overlap (and still fit in one snippet) share a snippet.
+ * A snippet starts at the sentence of its first match, or at that match (quoteStart); a window that ends inside a
+ * word is trimmed back to the word edge (never into a match).
+ */
+function snippetsAround(folded: Folded, spans: readonly Span[]): string[] {
+  const { text, lines } = folded;
   const regions: Region[] = [];
   for (const s of spans) {
     const start = Math.max(0, s.start - SNIPPET_BEFORE);
@@ -261,11 +303,8 @@ function snippetsAround(text: string, spans: readonly Span[]): string[] {
   const isHigh = (i: number) => text.charCodeAt(i) >= 0xd800 && text.charCodeAt(i) <= 0xdbff;
   return regions
     .map((r) => {
-      let { start, end } = r;
-      if (start > 0 && text[start - 1] !== " ") {
-        const space = text.indexOf(" ", start); // we start inside a word: begin at the next one
-        if (space !== -1 && space < r.lo) start = space + 1;
-      }
+      let start = quoteStart(lines, r.start, r.lo);
+      let { end } = r;
       if (end < text.length && text[end] !== " ") {
         const space = text.lastIndexOf(" ", end - 1); // we end inside a word: stop at the previous one
         if (space >= r.hi) end = space;
@@ -281,14 +320,16 @@ function snippetsAround(text: string, spans: readonly Span[]): string[] {
  * Injection pattern scan on JOINED text (never per item), after NFKC-style folding and collapsing whitespace to
  * single spaces. Returns one quoted snippet per hit (the match plus a little context, at most 200 characters;
  * hits whose context overlaps share one snippet, so the 5 patterns inside sample #9's single hidden sentence
- * give two snippets, not five near-copies), deduplicated, in document order, at most 20. Default patterns:
- * CONFIG.injectionPatterns. Runs in time linear in the text: see MAX_PATTERN_GAP.
+ * give two snippets, not five near-copies), deduplicated, in document order, at most 20. A snippet starts at the
+ * sentence of its first match when that starts at most 20 characters earlier, else at the match (UI-6), and runs
+ * up to 40 characters past its last match. Default patterns: CONFIG.injectionPatterns. Runs in time linear in
+ * the text: see MAX_PATTERN_GAP.
  */
 export function scanInjection(text: string, patterns: readonly RegExp[] = CONFIG.injectionPatterns): string[] {
   const out: string[] = [];
   /** true once the hit list is full */
-  const scan = (folded: string, regexes: readonly RegExp[]): boolean => {
-    for (const snippet of snippetsAround(folded, collectMatches(folded, regexes))) {
+  const scan = (folded: Folded, regexes: readonly RegExp[]): boolean => {
+    for (const snippet of snippetsAround(folded, collectMatches(folded.text, regexes))) {
       if (!out.includes(snippet)) out.push(snippet);
       if (out.length >= MAX_INJECTION_HITS) return true;
     }
@@ -507,14 +548,15 @@ export function groundExtraction(extraction: InvoiceExtraction, visible: string 
 }
 
 /* ------------------------------------------------------------------------------------------------
- * Bank accounts printed on the page (stage 6, fix round SEC-2)
+ * Bank accounts printed on the page (stage 6, fix round SEC-2; widened in fix round SEC-2-R1)
  * ---------------------------------------------------------------------------------------------- */
 
 /** Zero-width and other format characters: dropped before the account scan (they would split a number in two). */
 const FORMAT_CHARS = /[\p{Cf}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2800}]/gu;
 /**
- * A label after which a document prints an account number: "Account no", "Account number", "Acct. #", "A/C no.",
- * "Account:", "Bank account:", "IBAN". ("Account name:" and "Accounts Payable" are not labels.)
+ * Reading 1 (fix round SEC-2, unchanged): a label after which a document prints an account number: "Account no",
+ * "Account number", "Acct. #", "A/C no.", "Account:", "Bank account:", "IBAN". ("Account name:" and "Accounts Payable"
+ * are not labels.)
  */
 const ACCOUNT_LABEL = /\b(?:(?:account|acct\.?|a\/c)[ \t]*(?:no\b\.?|number\b|num\b\.?|#)[ \t]*[:#.]?|(?:bank[ \t]+)?account[ \t]*:|(iban)\b[ \t]*[:#.]?)[ \t]*/giu;
 /** What follows the label: one token, then more groups on the same line only when they start with a digit ("12 3456 7890"). */
@@ -527,6 +569,248 @@ const ACCOUNT_VALUE = /^[A-Z0-9][A-Z0-9\-/.]*(?:[ \t][0-9][A-Z0-9\-/.]*)*/iu;
 const IBAN_VALUE = /^[A-Z]{2}\d{2}(?:[ \t]?[A-Z0-9]{1,4}){1,8}/iu;
 const MAX_PRINTED_ACCOUNTS = 10;
 const MAX_ACCOUNT_CHARS = 40;
+
+/*
+ * Reading 3 (fix round SEC-2-R1). The attacker writes the label, so the scan reads what an AP clerk would call a bank
+ * account, not only reading 1's spellings ("A/C: ...", "Acct: ...", "Acc No ...", "Account 9876543210", "Account Nr.",
+ * "Sort code 20-00-00, Account 98765432", "Pay to account number:" with the number on the next line). It runs on the
+ * text with every whitespace run made ONE character (a line break when the run has one), so a table cell gap counts
+ * once. A label opens a window of ACCOUNT_WINDOW_CHARS that ends early at the next label; the first value in it that
+ * looks like an account is read. Kinds of label:
+ *  - naming the account number ("Acct: ", "A/C No.", "Account Nr.", "Bank acct", "Beneficiary account", "Konto-Nr.",
+ *    "IBAN"): words, line breaks and table cells may stand between label and value; a value needs 4 digits;
+ *  - bare "Account" / "Acct" / "A/C": the value must come right after it (a line break allowed, no word between);
+ *  - a bank code (sort code, routing / ABA, BSB, transit, SWIFT, BIC, IFSC, BLZ): the value right after it is the
+ *    code, not the account, and is skipped; an account after it is read (6 digits, or 4 with a letter);
+ *  - bank words ("Bank details", "Payment instructions", "pay to", "remit payment to", "wire funds to", "transfer to",
+ *    "deposit into", "beneficiary", "payee", "bank", "wire", "deposit"): the first value that looks like an account
+ *    (6 digits, or 4 with a letter; not a ZIP+4, a US phone number or a whole amount with thousands commas).
+ * Never a value: a date or a year, an amount (currency sign or cents), a percentage, a phone number after "+", a
+ * masked number (****5566). A window stops at a word that owns the number after it (invoice, PO, ref, customer, tel,
+ * date, due, total, tax, box, suite ...) and at another field's "label:" ("Due date:", "Account name:").
+ * Reading 4: an IBAN anywhere in the text whose ISO 13616 check digits are valid (no label needed).
+ */
+
+/** How far after a label a value may start (reading 3); whitespace runs count as one character. */
+const ACCOUNT_WINDOW_CHARS = 60;
+/** Between the words of a label: nothing, one space, one line break or a hyphen (whitespace runs are one character here). */
+const LABEL_GAP = String.raw`[ \n\-]?`;
+const NUMBER_WORD = String.raw`(?:number|nbr|num|nr|no|n°|#)(?![a-z])\.?`;
+/** "acc" names an account only with a number word or a colon after it, never bare: "ACC-44-5566" is an account, not a label. */
+const BARE_ACCOUNT_WORDS = String.raw`account|acct|accnt|a\/c|kontonummer|kontonr|konto|kto|compte|cuenta`;
+const ACCOUNT_WORD = String.raw`(?:${BARE_ACCOUNT_WORDS}|acc)\b`;
+/** After an owner word ("Bank acct", "Beneficiary account no"): an account word, "acc" only with a number word or a colon. */
+const OWNED_ACCOUNT = String.raw`(?:(?:${BARE_ACCOUNT_WORDS})\b(?:\.?${LABEL_GAP}${NUMBER_WORD})?|acc\b\.?(?:${LABEL_GAP}${NUMBER_WORD}|[ ]?[:#]))`;
+/**
+ * Every kind of label of reading 3, one alternative per named group (first match wins at a position). Literal words only:
+ * linear. Never the middle of a hyphenated value ("NW-ACCT-98765432" is one value, not a label).
+ */
+const BANK_LABEL = new RegExp(
+  String.raw`(?<![A-Za-z0-9][-./_])(?:` +
+  [
+    String.raw`(?<iban>\biban\b)`,
+    String.raw`(?<number>\b${ACCOUNT_WORD}\.?${LABEL_GAP}${NUMBER_WORD})`,
+    String.raw`(?<colon>\b${ACCOUNT_WORD}\.?[ ]?[:#])`,
+    String.raw`(?<owner>\b(?:bank|beneficiary(?:['’]s)?|payee|checking|chequing|cheque|savings|current|deposit|receiving|destination|settlement|payment|remittance|business|company|corporate|vendor|supplier)${LABEL_GAP}${OWNED_ACCOUNT})`,
+    String.raw`(?<code>\b(?:sort${LABEL_GAP}code|sortcode|swift${LABEL_GAP}code|swift|bic|aba|rtn|bsb|ifsc|blz|(?:bank|branch)${LABEL_GAP}code)\b|\b(?:routing|transit)\b(?:${LABEL_GAP}${NUMBER_WORD})?)`,
+    String.raw`(?<details>\b(?:bank(?:ing)?${LABEL_GAP}(?:details|info|information|particulars|coordinates)|account${LABEL_GAP}(?:details|info|information)|(?:payment|remittance|settlement|transfer|wire)${LABEL_GAP}(?:details|information|instructions)|wiring${LABEL_GAP}instructions)\b)`,
+    String.raw`(?<payto>\b(?:pay(?:ments?)?|remit(?:tance)?|send${LABEL_GAP}payment|make${LABEL_GAP}payment|wire|transfer|deposit|credit|payable)(?: [a-z]{1,15})? (?:to|into)\b)`,
+    String.raw`(?<bankword>\b(?:beneficiary|payee|bank|wire|deposit)\b)`,
+    String.raw`(?<bare>\b(?:${BARE_ACCOUNT_WORDS})\b\.?)`,
+  ].join("|") +
+    ")",
+  "giu",
+);
+/** A customer's own account number at the vendor ("Your account no", "Customer acct:") is not where to pay. */
+const CUSTOMER_BEFORE = /\b(?:customer|client|cust|your)\.?[ \n]?$/i;
+
+interface WindowRule {
+  /** fewest digits a value needs; `withLetter` when the value also has a letter (an account code such as "NW-1234") */
+  minDigits: number;
+  withLetter: number;
+  /** words may stand between the label and the value ("Account no: Harborview Savings Bank 98765432") */
+  filler: boolean;
+  /** the value right after the label is a bank code (sort code, routing number, SWIFT), not the account */
+  code: boolean;
+  /** the label only says bank details are near: ZIP+4, US phone and comma amount shapes are not read either */
+  loose: boolean;
+}
+const NAMED_RULE: WindowRule = { minDigits: 4, withLetter: 4, filler: true, code: false, loose: false };
+const BARE_RULE: WindowRule = { minDigits: 4, withLetter: 4, filler: false, code: false, loose: false };
+const CODE_RULE: WindowRule = { minDigits: 6, withLetter: 4, filler: true, code: true, loose: true };
+const NEARBY_RULE: WindowRule = { minDigits: 6, withLetter: 4, filler: true, code: false, loose: true };
+
+/** Words that own the number after them (an invoice, PO, reference, phone, date, amount, address number): a window ends there. */
+const NOT_ACCOUNT_WORDS = new Set([
+  "invoice", "inv", "order", "po", "p.o", "purchase", "ref", "reference", "customer", "cust", "client", "id", "tel",
+  "telephone", "phone", "fax", "mobile", "cell", "call", "email", "e-mail", "date", "dated", "due", "total", "subtotal",
+  "amount", "balance", "tax", "vat", "gst", "hst", "ein", "tin", "abn", "ssn", "qty", "quantity", "page", "box",
+  "lockbox", "suite", "ste", "unit", "zip", "postcode",
+]);
+/** Words that may carry a colon inside a window without ending it: the rest of a bank-details block. */
+const ACCOUNT_BLOCK_WORDS = new Set([
+  "account", "acct", "accnt", "acc", "a/c", "no", "nr", "nbr", "num", "number", "n", "iban", "bank", "banking",
+  "details", "beneficiary", "payee", "code", "sort", "sortcode", "routing", "aba", "rtn", "bsb", "transit", "swift",
+  "bic", "ifsc", "blz", "branch", "wire", "transfer", "deposit", "credit", "remit", "remittance", "payment",
+  "instructions", "information", "info", "to", "into", "konto", "kontonummer", "kontonr", "kto", "compte", "cuenta",
+]);
+/** The value right after one of these is a bank or branch code, not the account ("Sort code 20-00-00", "SWIFT NWBKGB2L"). */
+const BANK_CODE_WORDS = new Set(["code", "sortcode", "routing", "aba", "rtn", "bsb", "transit", "swift", "bic", "ifsc", "blz"]);
+/** May stand between a code word and its value ("Routing number: 021000021"). */
+const NUMBER_WORDS = new Set(["no", "nr", "nbr", "num", "number", "n"]);
+/** One token of a window: letters and digits with inner separators ("ACC-00-9911", "a/c", "1,150.00"). Sticky, no backtracking. */
+const WINDOW_CHUNK = /[A-Za-z0-9]+(?:[-./_,][A-Za-z0-9]+)*/y;
+/** Where an IBAN may start in the text (reading 4): two capitals and two digits at the start of a token. */
+const IBAN_START = /(?<![A-Za-z0-9])[A-Z]{2}\d{2}/g;
+
+/** Whitespace runs as one character: a line break when the run has one, else a space. */
+function flattenWhitespace(text: string): string {
+  return text.replace(/\s+/g, (run) => (/[\n\v\f\r\u{85}\u{2028}\u{2029}]/u.test(run) ? "\n" : " "));
+}
+
+/** ISO 13616 mod-97 step: one more character (A = 10 ... Z = 35) appended to a remainder. */
+function mod97(rem: number, ch: string): number {
+  const code = ch.charCodeAt(0);
+  return code >= 65 ? (rem * 100 + code - 55) % 97 : (rem * 10 + code - 48) % 97;
+}
+
+/**
+ * An IBAN whose check digits are valid, starting at `at` (two capitals, two digits, then capitals and digits with single
+ * spaces allowed between groups, 15 to 34 characters in all, ending at a token edge), else null. The longest valid one
+ * wins, so a word printed after it on the same line is not taken in. Reads at most 34 letters and digits.
+ */
+function ibanAt(text: string, at: number): string | null {
+  if (!/^[A-Z]{2}\d{2}/.test(text.slice(at, at + 4)) || (at > 0 && /[A-Za-z0-9]/.test(text[at - 1]))) return null;
+  const head = text.slice(at, at + 4);
+  let rem = 0; // mod 97 of the characters after the first four (which are appended last, ISO 13616)
+  let count = 4;
+  let best = -1;
+  for (let j = at + 4; j < text.length && count < 34; ) {
+    const ch = text[j];
+    if (/[A-Z0-9]/.test(ch)) {
+      rem = mod97(rem, ch);
+      count++;
+      j++;
+      if (count >= 15 && !/[A-Za-z0-9]/.test(text[j] ?? "")) {
+        let full = rem;
+        for (const h of head) full = mod97(full, h);
+        if (full === 1) best = j;
+      }
+    } else if (ch === " " && /[A-Z0-9]/.test(text[j + 1] ?? "")) {
+      j++;
+    } else {
+      break;
+    }
+  }
+  return best === -1 ? null : text.slice(at, best);
+}
+
+const inRange = (s: string, lo: number, hi: number): boolean => Number(s) >= lo && Number(s) <= hi;
+
+/** A year (1900-2099) or a date: 2026-10-28, 10/28/2026, 28.10.26 (day and month in range, either order). */
+function isDateOrYear(value: string): boolean {
+  if (/^(?:19|20)\d{2}$/.test(value)) return true;
+  let m = /^(?:19|20)\d{2}[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(value);
+  if (m) return inRange(m[1], 1, 12) && inRange(m[2], 1, 31);
+  m = /^(\d{1,2})[-/.](\d{1,2})[-/.](?:\d{2}|(?:19|20)\d{2})$/.exec(value);
+  return m !== null && ((inRange(m[1], 1, 31) && inRange(m[2], 1, 12)) || (inRange(m[1], 1, 12) && inRange(m[2], 1, 31)));
+}
+
+/** Could `value` (at `at`..`end` of `view`) be a bank account? Digits, then the shapes a reader knows are something else. */
+function accountLike(view: string, at: number, end: number, value: string, rule: WindowRule): boolean {
+  const digits = value.replace(/\D/g, "").length;
+  if (digits < (/[A-Za-z]/.test(value) ? rule.withLetter : rule.minDigits)) return false;
+  const before = view.slice(Math.max(0, at - 6), at);
+  if (/[+$€£¥] ?$/u.test(before) || /\b(?:usd|eur|gbp|cad|aud|chf) ?$/i.test(before)) return false; // a phone number (+1 ...) or an amount
+  if (/[*•]{2,} ?$/u.test(before) || /^[xX*]{2,}/.test(value)) return false; // masked (****5566, XXXX-5566): no one can pay into it
+  if (view[end] === "%" || isDateOrYear(value) || /^\d+(?:,\d{3})*\.\d{1,2}$/.test(value)) return false; // a percentage, date, year or amount with cents
+  if (rule.loose) {
+    if (/^\d{1,3}(?:,\d{3})+$/.test(value) || /^\d{5}-\d{4}$/.test(value)) return false; // a whole amount, a ZIP+4 code
+    if (/^\d{3}[-. ]\d{3}[-. ]\d{4}$/.test(value) || /\(\d{3}\) ?$/.test(before)) return false; // a US phone number
+  }
+  return true;
+}
+
+/**
+ * Reading 3's window: the first value that looks like an account, starting at `from` (the end of a label) and before
+ * min(from + ACCOUNT_WINDOW_CHARS, limit) (`limit` is where the next label starts). Every regex sees at most the
+ * window plus MAX_ACCOUNT_CHARS, so the work per label is bounded. `shapeAt` maps where an account on file is printed
+ * in its own format ("ACC 44 5566") to where that print ends: such a value is read whole.
+ */
+function readAfterLabel(flat: string, from: number, limit: number, rule: WindowRule, shapeAt: ReadonlyMap<number, number>): string | null {
+  const startBefore = Math.max(0, Math.min(limit, from + ACCOUNT_WINDOW_CHARS) - from);
+  const view = flat.slice(from, Math.min(flat.length, from + startBefore + MAX_ACCOUNT_CHARS));
+  let codeNext = rule.code; // the next value is a bank code
+  let i = 0;
+  while (i < startBefore) {
+    const ch = view[i];
+    if (ch === " ") {
+      i++;
+      continue;
+    }
+    if (ch === "\n") {
+      codeNext = false; // a value on a later line is not the code's
+      i++;
+      continue;
+    }
+    let value: string | null = null;
+    let next = i;
+    const shapeEnd = shapeAt.get(from + i);
+    if (shapeEnd !== undefined) {
+      value = flat.slice(from + i, shapeEnd);
+      next = shapeEnd - from;
+    } else {
+      const iban = ibanAt(view, i);
+      if (iban !== null) {
+        value = iban;
+        next = i + iban.length;
+      }
+    }
+    if (value === null) {
+      WINDOW_CHUNK.lastIndex = i;
+      const m = WINDOW_CHUNK.exec(view);
+      if (m === null) {
+        i++; // punctuation (":", "#", "(", "|", "·" ...): a pending code skip survives it
+        continue;
+      }
+      next = i + m[0].length;
+      if (!/\d/.test(m[0])) {
+        const word = m[0].toLowerCase();
+        if (NOT_ACCOUNT_WORDS.has(word)) return null;
+        const colon = view[next] === ":" || (view[next] === " " && view[next + 1] === ":");
+        if (colon && !ACCOUNT_BLOCK_WORDS.has(word)) return null; // another field's label ("Due date:", "Account name:")
+        if (BANK_CODE_WORDS.has(word)) codeNext = true;
+        else if (!NUMBER_WORDS.has(word)) {
+          if (!rule.filler) return null;
+          codeNext = false;
+        }
+        i = next;
+        continue;
+      }
+      value = m[0];
+      // A number printed in short groups is one value ("1234 5678 9012", "GB12 3456"), up to MAX_ACCOUNT_CHARS. A long
+      // group is a whole number, so the next table cell is not taken in ("98765432" then "20-00-00").
+      let group = m[0];
+      while (value.length < MAX_ACCOUNT_CHARS && group.length <= 5 && /\d$/.test(group) && view[next] === " " && /\d/.test(view[next + 1] ?? "")) {
+        WINDOW_CHUNK.lastIndex = next + 1;
+        const more = WINDOW_CHUNK.exec(view);
+        if (more === null) break;
+        group = more[0];
+        value = `${value} ${group}`;
+        next += 1 + group.length;
+      }
+    }
+    if (codeNext) {
+      codeNext = false; // "Sort code 20-00-00": the code, not the account
+      i = next;
+      continue;
+    }
+    if (accountLike(view, i, next, value, rule)) return value.slice(0, MAX_ACCOUNT_CHARS);
+    if (!rule.filler) return null;
+    i = next;
+  }
+  return null;
+}
 
 /** A regex for the SHAPE of an account on file: its letters as they are, any digit for a digit, an optional separator for anything else. */
 function accountShape(onFile: string): RegExp | null {
@@ -544,27 +828,39 @@ function accountShape(onFile: string): RegExp | null {
 /**
  * Account numbers printed in the visible text (pass buildGroundingText: tiny text is already gone), so the bank check
  * does not rest on the model alone (SEC-2: a model that obeyed a hidden note and left bank_account empty got an
- * invoice printing a NEW account approved). Two readings, both deterministic and linear:
- *  - the value after an account label ("Account no: ACC-00-9911", "Account number 1234 5678", "IBAN DE89 3704 ...");
- *  - anything shaped like an account on file (its letters, digits and separators), e.g. "ACC-00-9911" next to
- *    "ACC-44-5566", wherever it stands. An account on file with no letter gives no shape (it would match any number).
- * A value needs at least 4 digits. Returns the values as printed (one line, at most 40 characters), one per account
- * (compared with normId), at most 10. checkVendor compares them with the vendor's account on file.
+ * invoice printing a NEW account approved). Four readings, all deterministic and linear in the text:
+ *  1. the value right after an account label on its line ("Account no: ACC-00-9911", "Account number 1234 5678",
+ *     "IBAN DE89 3704 ...") (fix round SEC-2, unchanged);
+ *  2. anything shaped like an account on file (its letters, digits and separators), e.g. "ACC-00-9911" next to
+ *     "ACC-44-5566", wherever it stands. An account on file with no letter gives no shape (it would match any number);
+ *  3. (SEC-2-R1) the attacker writes the label: other spellings and bank words ("A/C:", "Acct:", "Acc No", "Account
+ *     9876543210", "Account Nr.", "Bank details: Sort code 20-00-00, Account 98765432", "Pay to account number:" with the
+ *     number on the next line or in the next table cell, "beneficiary", "remit to", "wire to", "deposit into" ...), see
+ *     BANK_LABEL and readAfterLabel above;
+ *  4. (SEC-2-R1) an IBAN anywhere whose check digits are valid.
+ * Readings 1 and 2 run first and exactly as before, so every value the first version read is still read; 3 and 4 can
+ * only add values (each one that is not the vendor's account on file is a bank mismatch: a HOLD, never an approval).
+ * A value needs at least 4 digits. Returns the values as printed (one line, at most 40 characters; a longer one from
+ * readings 3 and 4 is cut to 40, never dropped), one per account (compared with normId), at most 10. checkVendor
+ * compares them with the vendor's account on file.
  */
 export function printedBankAccounts(text: string, accountsOnFile: readonly (string | null)[] = []): string[] {
   const clean = (typeof text === "string" ? text : "").normalize("NFKC").replace(FORMAT_CHARS, "").replace(DASH_LIKE, "-");
   const found = new Map<string, string>();
+  const full = () => found.size >= MAX_PRINTED_ACCOUNTS;
   const keep = (raw: string) => {
     const value = raw.trim().replace(/[.\-/]+$/, "");
     const key = normId(value);
-    if (value.length > MAX_ACCOUNT_CHARS || (key.match(/\d/g) ?? []).length < 4 || found.has(key) || found.size >= MAX_PRINTED_ACCOUNTS) return;
+    if (value.length > MAX_ACCOUNT_CHARS || (key.match(/\d/g) ?? []).length < 4 || found.has(key) || full()) return;
     found.set(key, value);
   };
+  // 1. the value right after an account label, on the label's line (fix round SEC-2)
   for (const m of clean.matchAll(ACCOUNT_LABEL)) {
     const after = clean.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 2 * MAX_ACCOUNT_CHARS);
     const value = (m[1] !== undefined ? IBAN_VALUE : ACCOUNT_VALUE).exec(after);
     if (value) keep(value[0]);
   }
+  // 2. anything shaped like an account on file (fix round SEC-2)
   const shapes = new Map<string, RegExp>();
   for (const onFile of accountsOnFile) {
     if (typeof onFile !== "string") continue;
@@ -572,5 +868,44 @@ export function printedBankAccounts(text: string, accountsOnFile: readonly (stri
     if (shape) shapes.set(shape.source, shape);
   }
   for (const shape of shapes.values()) for (const m of clean.matchAll(shape)) keep(m[0]);
+  if (full()) return [...found.values()];
+
+  // 3. labels and bank words, the value in a window after them (SEC-2-R1)
+  const flat = flattenWhitespace(clean);
+  const spans: [number, number][] = [];
+  for (const shape of shapes.values()) for (const m of flat.matchAll(shape)) spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+  spans.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const shapeAt = new Map<number, number>();
+  for (const [start, end] of spans) if (!shapeAt.has(start)) shapeAt.set(start, end);
+  let open: { from: number; rule: WindowRule } | null = null;
+  let span = 0;
+  for (const m of flat.matchAll(BANK_LABEL)) {
+    const at = m.index ?? 0;
+    if (open !== null) {
+      const value = readAfterLabel(flat, open.from, at, open.rule, shapeAt); // a window ends where the next label starts
+      if (value !== null) keep(value);
+      open = null;
+    }
+    if (full()) break;
+    while (span < spans.length && spans[span][1] <= at) span++;
+    if (span < spans.length && spans[span][0] < at + m[0].length) continue; // overlaps a print of an account on file ("Bank ACC 44 5566")
+    const g = m.groups ?? {};
+    const named = g.number !== undefined || g.colon !== undefined;
+    if ((named || g.bare !== undefined) && CUSTOMER_BEFORE.test(flat.slice(Math.max(0, at - 12), at))) continue;
+    const rule =
+      named || g.iban !== undefined || g.owner !== undefined ? NAMED_RULE : g.bare !== undefined ? BARE_RULE : g.code !== undefined ? CODE_RULE : NEARBY_RULE;
+    open = { from: at + m[0].length, rule };
+  }
+  if (open !== null && !full()) {
+    const value = readAfterLabel(flat, open.from, flat.length, open.rule, shapeAt);
+    if (value !== null) keep(value);
+  }
+
+  // 4. an IBAN anywhere, when its check digits are valid (SEC-2-R1)
+  for (const m of flat.matchAll(IBAN_START)) {
+    if (full()) break;
+    const iban = ibanAt(flat, m.index ?? 0);
+    if (iban !== null) keep(iban);
+  }
   return [...found.values()];
 }

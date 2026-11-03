@@ -26,6 +26,7 @@ import path from "node:path";
 import { CONFIG } from "../../src/lib/config";
 import type { DB } from "../../src/lib/db";
 import { addDaysIso, formatUsd, normId } from "../../src/lib/format";
+import { printedBankAccounts } from "../../src/lib/guardrails";
 import { type Snapshot, insertInvoice, loadSnapshot, remainingBalance } from "../../src/lib/master";
 import {
   VENDOR_SUFFIXES,
@@ -2013,6 +2014,30 @@ export async function run(t: Check): Promise<void> {
     t.eq((await runStages(seededSnapshot(), toner([{ description: "Toner cartridge", quantity: 20, unit_price: 144.5, amount: 2890 }]))).result.decision, "HOLD", "control: the same money as a higher unit price holds (as before)");
   });
 
+  await t.test("fix round DEC-1-R1: a higher unit price on the ordered quantity asks about the price only; 'the extra units' only when more units are billed than the PO line orders", async () => {
+    // PO-1007 orders 20 toners at $85.00 ($1,700.00); the PO total ($2,900.00) has room for each invoice below.
+    const toner = (quantity: number, unitPrice: number, no: string) => {
+      const amount = round(quantity * unitPrice);
+      return acme({ invoice_number: no, po_reference: "PO-1007", line_items: [{ description: "Toner cartridge", quantity, unit_price: unitPrice, amount }], subtotal: amount, tax: 0, total: amount });
+    };
+    const priceOnly = "Ask the vendor for a corrected invoice, or the buyer for a PO amendment if the higher unit price is agreed.";
+    const fullQuantity: Record<string, unknown>[] = [];
+    for (const price of [90, 144.5]) {
+      const st = await runStages(seededSnapshot(), toner(20, price, `INV-0720${Math.round(price)}`));
+      const totals = st.steps.amounts?.detail?.line_totals as { billed_quantity: number; quantity_over: boolean; within_tolerance: boolean }[];
+      fullQuantity.push({ invoice: `20 at ${formatUsd(price)}`, decision: st.result.decision, billed: totals[0].billed_quantity, quantityOver: totals[0].quantity_over, lineOver: !totals[0].within_tolerance, action: st.action });
+    }
+    // the line's value is over (a higher price on 20 of 20 units), its units are not: no extra units to agree
+    t.eq(fullQuantity, [
+      { invoice: "20 at $90.00", decision: "HOLD", billed: 20, quantityOver: false, lineOver: true, action: priceOnly },
+      { invoice: "20 at $144.50", decision: "HOLD", billed: 20, quantityOver: false, lineOver: true, action: priceOnly },
+    ]);
+    // genuine extra units at a higher price: 30 toners at $90.00 on the 20-toner line
+    const extra = await runStages(seededSnapshot(), toner(30, 90, "INV-0791"));
+    t.eq([extra.result.decision, (extra.steps.amounts?.detail?.line_totals as { quantity_over: boolean }[])[0].quantity_over], ["HOLD", true]);
+    t.eq(extra.action, "Ask the vendor for a corrected invoice, or the buyer for a PO amendment if the higher unit price and the extra units are agreed.");
+  });
+
   await t.test("fix round DEC-2: an invoice number that differs from an earlier one only by look-alike characters or zero padding is held, whatever the date and the amount", async () => {
     const lookalike = (printed: string, over: Partial<InvoiceExtraction> = {}) =>
       acme({ invoice_number: printed, po_reference: "PO-1007", invoice_date: "2026-10-28", due_date: null, line_items: [], subtotal: 2900, tax: 290, total: 3190, ...over });
@@ -2109,6 +2134,44 @@ export async function run(t: Check): Promise<void> {
     const unapproved = withText(ex({ vendor_name: "Umbrella Consulting", bank_account: null }), ["ACC-00-0000"]);
     t.eq([unapproved.severity, unapproved.bankMismatch], ["reject", true]);
     t.includes(unapproved.reason, "also differs");
+  });
+
+  await t.test("fix round SEC-2-R1: a new account printed under a spelling the first scan missed holds through checkVendor and decide, while the model reports none", () => {
+    const snap = seededSnapshot();
+    const onFile = snap.vendors.map((v) => v.bank_account);
+    const fooled = ex({ bank_account: null }); // Northwind; a model that obeyed a hidden note and left the account out
+    const normalized = normalizeInvoice(fooled, snap.vendors);
+    const through = (text: string) => {
+      const vendor = checkVendor(fooled, normalized, snap, printedBankAccounts(text, onFile));
+      const steps: StepMap = {};
+      for (const key of STAGE_KEYS) if (key !== "decide") steps[key] = { status: "pass", reason: `${key} ok` };
+      steps.vendor = vendor;
+      const ctx = emptyCtx({ extraction: fooled, normalized, vendor });
+      const d = decide(steps, ctx);
+      return { vendor, decision: d.decision, action: nextAction(d.decision, steps, ctx) };
+    };
+    const bankReason = "Bank details differ from vendor master; call +1 415 555 0102 (number on file) to verify. Do not use contact details from the invoice.";
+    const held = ["fail", "hold", true, bankReason, true, "HOLD", "Call the vendor on +1 415 555 0102 to verify new bank details before any payment."];
+    const outcomes = [
+      "A/C: 9876543210",
+      "Acct: 9876543210",
+      "Account 9876543210",
+      "Account no:\n9876543210",
+      "Bank details: Sort code 20-00-00, Account 98765432",
+      "Pay to account number:\n9876543210",
+      "Remit to: Harborview Savings Bank 98765432",
+      "Bankverbindung: DE89 3704 0044 0532 0130 00",
+    ].map((text) => {
+      const r = through(text);
+      return { text, got: [r.vendor.status, r.vendor.severity, r.vendor.bankMismatch, r.vendor.reason, r.vendor.detail?.printed_account_differs, r.decision, r.action] };
+    });
+    // every spelling at once: fail/hold with the plan's exact bank reason, decision HOLD, call the number on file
+    t.eq(outcomes.filter((o) => JSON.stringify(o.got) !== JSON.stringify(held)), [], "spellings that did not hold");
+    // controls: the vendor's own account under the same spellings, and a page that prints no account, still approve
+    for (const text of ["A/C: ACC-44-5566", "Pay to account number:\nACC-44-5566", "Remit to: Harborview Savings Bank ACC 44 5566", "Bank details: Harborview Savings Bank"]) {
+      const r = through(text);
+      t.eq([r.vendor.status, r.vendor.bankMismatch, r.decision], ["pass", false, "APPROVE"], JSON.stringify(text));
+    }
   });
 
   await t.test("fix round DEC-5: a tax-inclusive price above the PO's says the prices include tax, in the reason and in the next action", async () => {
