@@ -63,12 +63,6 @@ export function filterNoun(filter: DashboardFilter): string {
   }
 }
 
-/** "57% of runs" for a KPI hint, or null when there are no runs (nothing sensible to say). */
-export function shareOf(count: number, total: number): string | null {
-  if (!Number.isFinite(count) || !Number.isFinite(total) || total <= 0) return null;
-  return `${Math.round((count / total) * 100)}% of runs`;
-}
-
 /* ------------------------------------------------------------------------------------------------ time */
 
 export interface WhenOptions {

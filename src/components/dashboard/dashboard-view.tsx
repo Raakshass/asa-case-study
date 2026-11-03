@@ -11,7 +11,7 @@ import { usePoll } from "@/components/shared/use-poll";
 import { Button } from "@/components/ui/button";
 import type { DashboardKpis } from "@/lib/types";
 import { FilterChips } from "./filter-chips";
-import { KpiRow } from "./kpi-row";
+import { LedgerBar } from "./ledger-bar";
 import { RunsTable } from "./runs-table";
 import { filterCount, filterNoun, type DashboardFilter } from "./run-format";
 
@@ -50,7 +50,7 @@ function NoRuns({ filter, onShowAll }: { filter: DashboardFilter; onShowAll: () 
 }
 
 /**
- * The dashboard: KPI tiles, filter chips and the table of runs, refreshed every 3 seconds through usePoll.
+ * The dashboard: the ledger bar, the filter buttons and the table of runs, refreshed every 3 seconds through usePoll.
  *
  * The filter is part of the poll's resetKey, so a change aborts the old request and starts a fresh one for
  * GET /api/runs?decision=...; the table shows its skeleton for that moment. The KPIs do not depend on the
@@ -84,7 +84,7 @@ export function DashboardView() {
   } else if (error) {
     body = <ErrorState title="Could not load the runs" message={error.message} onRetry={retry} retrying={retrying} />;
   } else {
-    body = <TableSkeleton rows={6} columns={8} label="Loading runs" />;
+    body = <TableSkeleton rows={6} columns={6} label="Loading runs" />;
   }
 
   const shown = data ? data.runs.length : null;
@@ -97,7 +97,7 @@ export function DashboardView() {
 
   return (
     <div className="space-y-6">
-      <KpiRow kpis={kpis} loading={kpis === null && loading} />
+      <LedgerBar kpis={kpis} loading={kpis === null && loading} />
       <div className="space-y-3">
         <FilterChips value={filter} onChange={setFilter} kpis={kpis} />
         {/* Tells screen-reader users what a press of a filter did; announced politely, changes only with the result. */}
@@ -115,7 +115,7 @@ export function DashboardView() {
         ) : null}
         {body}
         {data && matching > data.runs.length ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Showing the newest {data.runs.length} of {matching} {filterNoun(filter) === "all" ? "" : `${filterNoun(filter)} `}runs.
           </p>
         ) : null}

@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Database, Upload } from "lucide-react";
+import { Upload } from "lucide-react";
 import { DashboardView } from "@/components/dashboard/dashboard-view";
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 };
 
 /**
- * `/` Dashboard (plan section 9): the KPI row, the filter chips and the table of runs. The page itself is a
+ * `/` Dashboard (plan section 9): the ledger bar, the filter buttons and the table of runs. The page itself is a
  * static shell; DashboardView (a client component) loads and refreshes the data through GET /api/runs.
  */
 export default function DashboardPage() {
@@ -20,20 +20,12 @@ export default function DashboardPage() {
         title="Dashboard"
         description="Every invoice the agent has processed, newest first. The page refreshes by itself every few seconds."
         actions={
-          <>
-            <Button asChild size="lg">
-              <Link href="/runs/new">
-                <Upload aria-hidden="true" />
-                New run
-              </Link>
-            </Button>
-            <Button asChild size="lg" variant="outline">
-              <Link href="/data">
-                <Database aria-hidden="true" />
-                Procurement data
-              </Link>
-            </Button>
-          </>
+          <Button asChild size="lg">
+            <Link href="/runs/new">
+              <Upload aria-hidden="true" />
+              New run
+            </Link>
+          </Button>
         }
       />
       <DashboardView />

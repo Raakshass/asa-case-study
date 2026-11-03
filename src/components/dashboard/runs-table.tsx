@@ -10,18 +10,11 @@ import { SecurityBadge } from "@/components/shared/security-badge";
 import { TableFrame } from "@/components/shared/table-frame";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { RunListItem } from "@/lib/types";
-import { amountView, displayText, fileLabel, formatCost, formatWhen, reasonView } from "./run-format";
+import { amountView, displayText, fileLabel, formatWhen, reasonView } from "./run-format";
 
-/** Small tag on a pre-loaded history row: the invoice was processed before the demo (its run page shows a record, not the stepper). */
-function HistoryTag() {
-  return (
-    <span
-      title="Pre-loaded history record: processed before the demo"
-      className="inline-flex h-5 shrink-0 items-center rounded-full border border-border bg-muted px-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase"
-    >
-      history
-    </span>
-  );
+/** Capitalises the first letter (a reason that lost its lead-in prefix). */
+function sentence(text: string): string {
+  return text === "" ? text : text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 /** "–" for a value the run does not have (yet), with a screen-reader word so the cell is never silent. */
@@ -51,9 +44,13 @@ function RunRow({ run }: { run: RunListItem }) {
   const router = useRouter();
   const href = `/runs/${encodeURIComponent(run.id)}`;
   const when = formatWhen(run.created_at, { dateOnly: run.is_history });
-  const reason = reasonView(run);
+  const reasonRaw = reasonView(run);
+  // A pre-loaded record's reason arrives as "Pre-loaded history: processed before the demo.": the line under the vendor already says it.
+  const reason = run.is_history ? { ...reasonRaw, text: sentence(reasonRaw.text.replace(/^pre-loaded history:\s*/i, "")) } : reasonRaw;
   const file = fileLabel(run);
   const vendor = displayText(run.vendor_name, 200);
+  // Under the vendor: what kind of record it is (history), else the file it came from.
+  const sub = run.is_history ? "Pre-loaded history" : vendor ? file : "";
   const invoiceNumber = displayText(run.invoice_number, 200);
 
   function followRow(event: MouseEvent<HTMLTableRowElement>) {
@@ -69,7 +66,7 @@ function RunRow({ run }: { run: RunListItem }) {
 
   return (
     <TableRow data-run-id={run.id} className="group cursor-pointer focus-within:bg-accent/40" onClick={followRow}>
-      <TableCell className="px-3 py-3 text-muted-foreground">
+      <TableCell className="px-3 py-3 whitespace-nowrap text-muted-foreground">
         {when ? (
           <time dateTime={run.created_at} title={when.full}>
             {when.text}
@@ -79,37 +76,29 @@ function RunRow({ run }: { run: RunListItem }) {
         )}
       </TableCell>
       <TableCell className="px-3 py-3">
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-2">
-            <Link
-              href={href}
-              prefetch={false}
-              title={file}
-              className="block max-w-[12rem] truncate rounded-sm py-0.5 font-medium text-foreground underline-offset-4 hover:underline"
-            >
-              {file}
-            </Link>
-            {run.is_history ? <HistoryTag /> : null}
-          </div>
+        <div className="flex flex-col gap-0.5">
+          {/* The one link of the row: the keyboard and screen-reader way in. A run with no vendor read is named by its file. */}
+          <Link
+            href={href}
+            prefetch={false}
+            title={vendor || file}
+            className="block max-w-[14rem] truncate rounded-sm py-0.5 font-semibold text-foreground underline-offset-4 hover:underline"
+          >
+            {vendor || file}
+          </Link>
+          <span title={sub} className="block max-w-[14rem] truncate text-sm text-muted-foreground">
+            {sub}
+          </span>
           {/* Below 1024 px the Decision column is off the edge of the table's scroll frame: show the decision here too (UI-1). */}
-          <div data-decision-inline="true" className="flex flex-wrap items-center gap-1.5 lg:hidden">
+          <div data-decision-inline="true" className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 lg:hidden">
             <DecisionBadge decision={run.decision} runStatus={run.status} size="sm" />
             {run.security_flag ? <SecurityBadge size="sm" /> : null}
           </div>
         </div>
       </TableCell>
       <TableCell className="px-3 py-3">
-        {vendor ? (
-          <span className="block max-w-[12rem] truncate" title={vendor}>
-            {vendor}
-          </span>
-        ) : (
-          <Placeholder label="No vendor" />
-        )}
-      </TableCell>
-      <TableCell className="px-3 py-3">
         {invoiceNumber ? (
-          <span className="block max-w-[10rem] truncate tabular-nums" title={invoiceNumber}>
+          <span className="block max-w-[10rem] truncate font-mono text-sm" title={invoiceNumber}>
             {invoiceNumber}
           </span>
         ) : (
@@ -120,7 +109,7 @@ function RunRow({ run }: { run: RunListItem }) {
         <AmountCell run={run} />
       </TableCell>
       <TableCell className="px-3 py-3">
-        <div className="flex max-w-[10rem] flex-wrap items-center gap-1.5">
+        <div className="flex max-w-[10rem] flex-wrap items-center gap-x-3 gap-y-1">
           <DecisionBadge decision={run.decision} runStatus={run.status} size="sm" />
           {run.security_flag ? <SecurityBadge size="sm" /> : null}
         </div>
@@ -133,7 +122,6 @@ function RunRow({ run }: { run: RunListItem }) {
           {reason.text}
         </span>
       </TableCell>
-      <TableCell className="px-3 py-3 text-right text-muted-foreground tabular-nums">{formatCost(run.cost_usd)}</TableCell>
     </TableRow>
   );
 }
@@ -143,27 +131,24 @@ export interface RunsTableProps {
 }
 
 /**
- * The dashboard table: Time, File, Vendor, Invoice #, Amount, Decision (+ shield), Top reason, Cost. It scrolls
+ * The dashboard table: Date, Vendor (with the file or "Pre-loaded history" under it), Invoice no., Amount, Decision (+ shield), Reason. It scrolls
  * inside its own frame on a narrow screen (the page never scrolls sideways); below 1024 px the decision is repeated
- * under the file name, so a phone shows what happened to each invoice without scrolling the table. Every run text
+ * under the vendor, so a phone shows what happened to each invoice without scrolling the table. Every run text
  * is plain React text.
  */
 export function RunsTable({ runs }: RunsTableProps) {
   return (
     <TableFrame label="Recent runs">
       <TableHeader>
-        <TableRow className="bg-muted/50 hover:bg-muted/50">
+        <TableRow className="hover:bg-transparent">
           <TableHead scope="col" className="px-3">
-            Time
-          </TableHead>
-          <TableHead scope="col" className="px-3">
-            File
+            Date
           </TableHead>
           <TableHead scope="col" className="px-3">
             Vendor
           </TableHead>
           <TableHead scope="col" className="px-3">
-            Invoice #
+            Invoice no.
           </TableHead>
           <TableHead scope="col" className="px-3 text-right">
             Amount
@@ -172,10 +157,7 @@ export function RunsTable({ runs }: RunsTableProps) {
             Decision
           </TableHead>
           <TableHead scope="col" className="px-3">
-            Top reason
-          </TableHead>
-          <TableHead scope="col" className="px-3 text-right">
-            Cost
+            Reason
           </TableHead>
         </TableRow>
       </TableHeader>
