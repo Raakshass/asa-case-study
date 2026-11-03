@@ -149,10 +149,10 @@ export async function getTextItems(buf: Uint8Array): Promise<TextItem[]> {
 }
 
 /* ------------------------------------------------------------------------------------------------
- * The same text read, isolated in a worker thread (validateUpload only)
+ * The whole parse (pdf-lib structure + the same text read), isolated in a worker thread (validateUpload only)
  * ---------------------------------------------------------------------------------------------- */
 
-/** Plain-JS worker next to this file (src/lib/pdf-text-worker.mjs); it mirrors readPdfText item for item. */
+/** Plain-JS worker next to this file (src/lib/pdf-text-worker.mjs); it mirrors loadStructure + getPageCount, then readPdfText item for item. */
 const TEXT_WORKER_FILE = "pdf-text-worker.mjs";
 /** Heap cap of one text-parse worker. A 5-page invoice needs a few MB; a hostile file stops here, not at the machine's limit. */
 export const TEXT_WORKER_HEAP_MB = 256;
@@ -166,9 +166,33 @@ export const TEXT_WORKER_HEAP_MB = 256;
 export const TEXT_WORKER_MAX_GROWTH_MB = 256;
 const MEMORY_CHECK_MS = 50;
 
+/**
+ * What pdf-lib says about the file (pdf-text-worker.mjs readStructure, or loadStructure + getPageCount in-process):
+ * parsed at all, encrypted, and its page leaves (null when the count cannot be read).
+ */
+interface PdfStructureInfo {
+  parsed: boolean;
+  encrypted: boolean;
+  libPages: number | null;
+}
+
+/** One inspection of an upload: the structure, and the text layer when the structure did not already decide. */
+interface Inspection {
+  structure: PdfStructureInfo;
+  items: TextItem[] | null;
+  pageCount: number | null;
+}
+
 type WorkerReply =
-  | { ok: true; items: TextItem[]; pageCount: number }
+  | { ok: true; structure?: unknown; items?: TextItem[] | null; pageCount?: number | null }
   | { ok: false; error?: { name?: unknown; kind?: unknown; pages?: unknown } };
+
+/** The worker's structure answer, read defensively (a reply of another shape is treated as "not parseable"). */
+function structureFrom(value: unknown): PdfStructureInfo {
+  const v = (value !== null && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const libPages = typeof v.libPages === "number" && Number.isFinite(v.libPages) ? v.libPages : null;
+  return { parsed: v.parsed === true, encrypted: v.encrypted === true, libPages };
+}
 
 let textWorkerPath: string | null | undefined;
 /** One warm worker kept between uploads (starting one costs ~150 ms). A busy, failed or killed worker is never reused. */
@@ -240,17 +264,19 @@ function errorFromWorker(e: { name?: unknown; kind?: unknown; pages?: unknown } 
 }
 
 /**
- * readPdfText in a worker thread with a HARD deadline. pdf.js interprets a content stream in one synchronous
- * run: in-process, a 157 KB file of non-text operators blocked the whole event loop for 8.5 s (the deadline
- * timer and every HTTP request with it) and grew the process to ~600 MB. Here the deadline terminates the
- * worker (Worker#terminate stops even a synchronous loop), its heap is capped at TEXT_WORKER_HEAP_MB, and a
- * watchdog terminates it when the process grows by more than TEXT_WORKER_MAX_GROWTH_MB (decoded streams live
- * outside the heap). Falls back to the in-process reader (old behaviour, logged once) only when no worker can
- * be started.
+ * The whole parse of an upload in a worker thread with a HARD deadline: pdf-lib's structure (encryption, page leaves)
+ * and then the pdf.js text layer, as ONE job (one queue slot, one deadline, one memory watchdog). Both parsers can run
+ * synchronously for as long as a hostile file wants: in-process, a 157 KB file of non-text operators blocked the whole
+ * event loop for 8.5 s in pdf.js (RG-1), and a ~3 KB page tree that lists the same child twice per level kept pdf-lib's
+ * getPageCount busy for 2^depth visits (13 s at depth 26, days at depth 40) while a 1 KB object-stream bomb inflated
+ * 256 MB during PDFDocument.load (SEC-1). Here the deadline terminates the worker (Worker#terminate stops even a
+ * synchronous loop), its heap is capped at TEXT_WORKER_HEAP_MB, and a watchdog terminates it when the process grows by
+ * more than TEXT_WORKER_MAX_GROWTH_MB (decoded streams live outside the heap). Falls back to the in-process parse (old
+ * behaviour, logged once) only when no worker can be started.
  */
-async function readPdfTextIsolated(buf: Uint8Array, limits: ReadLimits, abort: Abort): Promise<{ items: TextItem[]; pageCount: number }> {
+async function inspectIsolated(buf: Uint8Array, limits: ReadLimits, abort: Abort): Promise<Inspection> {
   const file = findTextWorker();
-  if (file === null) return readInProcess(buf, limits, abort);
+  if (file === null) return inspectInProcess(buf, limits, abort);
   const previous = textQueue;
   let release: () => void = () => undefined;
   textQueue = new Promise<void>((resolve) => (release = resolve));
@@ -261,20 +287,36 @@ async function readPdfTextIsolated(buf: Uint8Array, limits: ReadLimits, abort: A
     try {
       worker = takeTextWorker(file);
     } catch {
-      return await readInProcess(buf, limits, abort);
+      return await inspectInProcess(buf, limits, abort);
     }
-    return await readOnWorker(worker, buf, limits, abort);
+    return await inspectOnWorker(worker, buf, limits, abort);
   } finally {
-    void previous.then(release); // the next read starts only after this one AND the one before it are done
+    void previous.then(release); // the next parse starts only after this one AND the one before it are done
   }
 }
 
-function readInProcess(buf: Uint8Array, limits: ReadLimits, abort: Abort): Promise<{ items: TextItem[]; pageCount: number }> {
+/** The same inspection on the main thread: only when no worker can be started (the deadline cannot interrupt it). */
+async function inspectInProcess(buf: Uint8Array, limits: ReadLimits, abort: Abort): Promise<Inspection> {
   if (!warnedInProcess) {
     warnedInProcess = true;
-    console.warn("pdf.ts: no text-parse worker could be started; PDFs are parsed in-process (the upload deadline cannot interrupt pdf.js)");
+    console.warn("pdf.ts: no text-parse worker could be started; PDFs are parsed in-process (the upload deadline cannot interrupt pdf-lib or pdf.js)");
   }
-  return readPdfText(buf, limits, abort);
+  const loaded = await loadStructure(buf);
+  let libPages: number | null = null;
+  if (loaded.doc !== null && !loaded.encrypted) {
+    try {
+      libPages = loaded.doc.getPageCount(); // throws TypeError on a header-only file
+    } catch {
+      libPages = null;
+    }
+  }
+  const structure: PdfStructureInfo = { parsed: loaded.doc !== null, encrypted: loaded.encrypted, libPages };
+  if (!structure.parsed || structure.encrypted || libPages === null || libPages < 1 || libPages > limits.maxPages) {
+    return { structure, items: null, pageCount: null };
+  }
+  checkAbort(abort);
+  const { items, pageCount } = await readPdfText(buf, limits, abort);
+  return { structure, items, pageCount };
 }
 
 /** What the main thread itself holds: its V8 heap and its external memory (Buffers, ArrayBuffers, Blobs). */
@@ -294,8 +336,8 @@ function workerGrowthBytes(start: { rss: number; main: number }): number {
   return process.memoryUsage.rss() - start.rss - Math.max(0, mainThreadBytes() - start.main);
 }
 
-/** One job on a worker: resolves with the items or rejects (limit, deadline, crash); the worker is kept only when healthy. */
-function readOnWorker(worker: Worker, buf: Uint8Array, limits: ReadLimits, abort: Abort): Promise<{ items: TextItem[]; pageCount: number }> {
+/** One job on a worker: resolves with the inspection or rejects (limit, deadline, crash); the worker is kept only when healthy. */
+function inspectOnWorker(worker: Worker, buf: Uint8Array, limits: ReadLimits, abort: Abort): Promise<Inspection> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
@@ -318,8 +360,11 @@ function readOnWorker(worker: Worker, buf: Uint8Array, limits: ReadLimits, abort
     const onMessage = (reply: WorkerReply) =>
       settle(true, () => {
         if (abort.stopped || performance.now() > abort.deadline) reject(new PdfLimitError("time")); // never accepted late
-        else if (reply?.ok === true) resolve({ items: reply.items, pageCount: reply.pageCount });
-        else reject(errorFromWorker(reply?.error));
+        else if (reply?.ok === true) {
+          const items = Array.isArray(reply.items) ? reply.items : null;
+          const pageCount = typeof reply.pageCount === "number" ? reply.pageCount : null;
+          resolve({ structure: structureFrom(reply.structure), items, pageCount });
+        } else reject(errorFromWorker(reply?.error));
       });
     const onFailure = () => settle(false, () => reject(new Error("text worker failed"))); // crash, heap cap, early exit
     worker.on("message", onMessage);
@@ -431,24 +476,28 @@ export function uploadFailureFromError(e: unknown, sizeBytes: number, maxPages: 
   return fail("damaged", UPLOAD_REASONS.damaged, sizeBytes);
 }
 
-/** The slow, possibly hostile part: pdf-lib structure, then the pdf.js text layer, once. */
+/** The raw "/Encrypt" fallback for bytes pdf-lib cannot parse at all (linear, cheap: it stays on the main thread). */
+function hasEncryptMarker(buf: Uint8Array): boolean {
+  return Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength).includes("/Encrypt");
+}
+
+/**
+ * The slow, possibly hostile part: pdf-lib structure, then the pdf.js text layer, once, both in the worker
+ * (inspectIsolated). The verdicts and their order are those of the in-process version they replace: encrypted ->
+ * HOLD; not parseable or no readable page count -> damaged; too many pages; no pages -> damaged; then the text layer;
+ * then the two parsers' page counts must agree.
+ */
 async function inspectPdf(buf: Uint8Array, maxPages: number, abort: Abort): Promise<UploadValidation> {
   const sizeBytes = buf.byteLength;
-  const structure = await loadStructure(buf);
-  if (structure.encrypted) return fail("encrypted", UPLOAD_REASONS.encrypted, sizeBytes);
-  if (!structure.doc) return fail("damaged", UPLOAD_REASONS.damaged, sizeBytes);
-
-  let libPages: number;
-  try {
-    libPages = structure.doc.getPageCount(); // throws TypeError on a header-only file
-  } catch {
-    return fail("damaged", UPLOAD_REASONS.damaged, sizeBytes);
-  }
+  const { structure, items, pageCount } = await inspectIsolated(buf, { maxPages, maxItems: MAX_TEXT_ITEMS, maxChars: MAX_TEXT_CHARS }, abort);
+  if (structure.encrypted || (!structure.parsed && hasEncryptMarker(buf))) return fail("encrypted", UPLOAD_REASONS.encrypted, sizeBytes);
+  if (!structure.parsed) return fail("damaged", UPLOAD_REASONS.damaged, sizeBytes);
+  const libPages = structure.libPages;
+  if (libPages === null) return fail("damaged", UPLOAD_REASONS.damaged, sizeBytes); // getPageCount threw (a header-only file)
   if (libPages > maxPages) return fail("too_many_pages", tooManyPagesReason(libPages, maxPages), sizeBytes, libPages);
   if (libPages < 1) return fail("damaged", UPLOAD_REASONS.damaged, sizeBytes);
-
   checkAbort(abort);
-  const { items, pageCount } = await readPdfTextIsolated(buf, { maxPages, maxItems: MAX_TEXT_ITEMS, maxChars: MAX_TEXT_CHARS }, abort);
+  if (items === null || pageCount === null) return fail("damaged", UPLOAD_REASONS.damaged, sizeBytes);
   // pdf-lib counts page leaves, pdf.js reads /Count. They agree on every sane file; a file where they differ
   // shows each parser different pages, so it is treated as damaged rather than trusted.
   if (pageCount !== libPages) return fail("damaged", UPLOAD_REASONS.damaged, sizeBytes);
@@ -460,12 +509,13 @@ async function inspectPdf(buf: Uint8Array, maxPages: number, abort: Abort): Prom
  * UPLOAD_TIMEOUT_MS; tests use a tiny one). When the budget runs out the result is the "damaged" rejection,
  * even if the parse finally completes: a file that needed longer than its budget is never accepted.
  *
- * How the bound is enforced: pdf-lib's structure parse runs on the main thread and yields every 100 objects,
- * so the timer and the checks between steps cut it off. The pdf.js text read runs in a worker thread
- * (readPdfTextIsolated) that is terminated at the deadline, so a synchronous pdf.js run (measured in-process:
- * 40 million non-text operators in a 157 KB file blocked the event loop for 8.5 s) no longer blocks the
- * server; the main thread stays responsive and the upload is rejected at its deadline. Text floods are still
- * cut off early by the item and character caps, inside the worker.
+ * How the bound is enforced: the whole parse, pdf-lib's structure step and the pdf.js text read, runs in ONE job on a
+ * worker thread (inspectIsolated) that is terminated at the deadline, so neither a synchronous pdf.js run (measured
+ * in-process: 40 million non-text operators in a 157 KB file blocked the event loop for 8.5 s) nor a pdf-lib page-tree
+ * walk or object-stream inflate (red team SEC-1: a ~3 KB file froze the server for 13 s and more) blocks the server;
+ * the main thread stays responsive and the upload is rejected at its deadline, with no parse left running behind it.
+ * Text floods are still cut off early by the item and character caps, inside the worker. Only when no worker can be
+ * started does the parse run in-process again (logged once), where the deadline cannot interrupt it.
  */
 export async function validateUploadWithin(
   buf: Uint8Array,

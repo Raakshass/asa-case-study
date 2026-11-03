@@ -23,6 +23,7 @@ import {
   groundExtraction,
   isImageOnly,
   joinText,
+  printedBankAccounts,
   scanInjection,
   screenPdf,
   tokenize,
@@ -223,6 +224,100 @@ async function imageOnlyPdf(): Promise<Buffer> {
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
   doc.addPage([300, 300]).drawImage(await doc.embedPng(png), { x: 0, y: 0, width: 300, height: 300 });
   return Buffer.from(await doc.save());
+}
+
+/** A PDF from raw objects (numbered 1..n in order) with a correct classic xref table and a trailer rooted at object 1. */
+function rawPdf(objects: (string | Buffer)[]): Buffer {
+  const parts: Buffer[] = [];
+  let offset = 0;
+  const push = (b: Buffer | string) => {
+    const buf = typeof b === "string" ? Buffer.from(b, "latin1") : b;
+    parts.push(buf);
+    offset += buf.length;
+  };
+  push("%PDF-1.7\n%\u{E2}\u{E3}\u{CF}\u{D3}\n");
+  const offsets: number[] = [];
+  objects.forEach((o, i) => {
+    offsets.push(offset);
+    push(`${i + 1} 0 obj\n`);
+    push(o);
+    push("\nendobj\n");
+  });
+  const xref = offset;
+  push(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("")}`);
+  push(`trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+  return Buffer.concat(parts);
+}
+
+/** A stream object body: dictionary entries (without /Length) and the bytes. */
+const rawStream = (entries: string, data: Buffer | string): Buffer => {
+  const bytes = typeof data === "string" ? Buffer.from(data, "latin1") : data;
+  return Buffer.concat([Buffer.from(`<< ${entries} /Length ${bytes.length} >>\nstream\n`, "latin1"), bytes, Buffer.from("\nendstream", "latin1")]);
+};
+
+/** Objects 1 (catalog), 3 (the one real page) and 4 (its text) of the raw fixtures below; object 2 is each fixture's page tree root. */
+const RAW_CATALOG = "<< /Type /Catalog /Pages 2 0 R >>";
+const RAW_PAGE =
+  "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>";
+const RAW_PAGE_TEXT = rawStream("", "BT /F1 12 Tf 72 700 Td (Invoice INV-1 total 100.00) Tj ET");
+
+/**
+ * Red team SEC-1: a ~3 KB file whose page tree is a DAG. Every /Pages node below the root lists the SAME child twice,
+ * `depth` levels deep, so pdf-lib's recursive page walk (getPageCount, no visited set) makes 2^depth visits: 2^24 is
+ * about 3 s of synchronous work, 2^40 is days. There is one real page; pdf.js tracks visited nodes and reads 1 page.
+ */
+function pageTreeDag(depth: number): Buffer {
+  const first = 5;
+  const objects: (string | Buffer)[] = [RAW_CATALOG, `<< /Type /Pages /Kids [3 0 R ${first} 0 R] /Count 1 >>`, RAW_PAGE, RAW_PAGE_TEXT];
+  for (let i = 0; i <= depth; i++) {
+    const self = first + i;
+    const kids = i < depth ? `${self + 1} 0 R ${self + 1} 0 R` : "";
+    objects.push(`<< /Type /Pages /Parent ${i === 0 ? 2 : self - 1} 0 R /Kids [${kids}] /Count 0 >>`);
+  }
+  return rawPdf(objects);
+}
+
+/** Red team SEC-1: a valid 1-page PDF plus one object stream, Flate-compressed twice, that inflates to `mb` MB (~1 KB on disk). */
+function objStmBomb(mb: number): Buffer {
+  const inner = Buffer.concat([Buffer.from("99 0\n", "latin1"), Buffer.alloc(mb * 1024 * 1024, 0x20)]);
+  const twice = deflateSync(deflateSync(inner, { level: 9 }), { level: 9 });
+  return rawPdf([RAW_CATALOG, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>", RAW_PAGE, RAW_PAGE_TEXT, rawStream("/Type /ObjStm /N 1 /First 5 /Filter [/FlateDecode /FlateDecode]", twice)]);
+}
+
+/** Red team SEC-1: about 1 MB of minimal invalid objects; pdf-lib prints one console.warn line for each (100,000 lines). */
+function invalidObjectFlood(): Buffer {
+  const head = "%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n";
+  const body: string[] = [];
+  let size = head.length;
+  for (let n = 4; size < 1024 * 1024; n++) {
+    const obj = `${n} 0 obj\n]\nendobj\n`;
+    body.push(obj);
+    size += obj.length;
+  }
+  return Buffer.from(`${head}${body.join("")}trailer\n<< /Root 1 0 R /Size ${body.length + 4} >>\n%%EOF\n`, "latin1");
+}
+
+/** Counts what reaches this process's console.warn / console.error and stderr while `fn` runs (and prints none of it). */
+async function countingLogs<T>(fn: () => Promise<T>): Promise<{ value: T; lines: number }> {
+  const warn = console.warn;
+  const error = console.error;
+  const write = process.stderr.write;
+  let lines = 0;
+  console.warn = () => void lines++;
+  console.error = () => void lines++;
+  process.stderr.write = (() => {
+    lines++;
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const value = await fn();
+    await new Promise((resolve) => setTimeout(resolve, 100)); // a worker's stderr arrives asynchronously
+    return { value, lines };
+  } finally {
+    console.warn = warn;
+    console.error = error;
+    process.stderr.write = write;
+  }
 }
 
 /** pdf-lib prints "Trying to parse invalid object" warnings for damaged files; keep the check output clean. */
@@ -667,6 +762,30 @@ export async function run(t: Check): Promise<void> {
     t.ok(miss.ms < 2500, `${Math.round(miss.ms)} ms`);
   });
 
+  await t.test("fix round SEC-2: printedBankAccounts reads account numbers from the visible text (labels and the master's account shape), nothing else", async () => {
+    const onFile = ["ACC-11-2233", "ACC-44-5566", "ACC-77-8899", "ACC-12-3456", "ACC-99-0000"];
+    const cases: [string, string[]][] = [
+      ["Account no: ACC-00-9911\nPayment terms: Net 30", ["ACC-00-9911"]],
+      ["Please pay to ACC-00-9911 from now on", ["ACC-00-9911"]],
+      ["Account number 1234 5678 9012 Sort code 12-34-56", ["1234 5678 9012"]],
+      ["Acct. #: 778899-01", ["778899-01"]],
+      ["A/C no. 4455 6677", ["4455 6677"]],
+      ["Bank account: 99887766", ["99887766"]],
+      ["IBAN: GB29 NWBK 6016 1331 9268 19", ["GB29 NWBK 6016 1331 9268 19"]],
+      [`Account no: ACC${ZWSP}-00-9911`, ["ACC-00-9911"]],
+      [`Pay to ${fullwidth("ACC-00-9911")}`, ["ACC-00-9911"]],
+      ["Account name: Northwind IT Solutions LLC\nAccounts Payable\nSTATEMENT OF ACCOUNT\nACCOUNT SUMMARY", []],
+      ["Account no: see the remittance slip", []],
+      ["Tel +1 415 555 0102 · NW-7781 · PO-1002 · ST-2026-10 · GLX-303 · 2026-10-28 · 4,620.00", []],
+    ];
+    for (const [text, want] of cases) t.eq(printedBankAccounts(text, onFile).map((a) => a.toUpperCase()), want.map((a) => a.toUpperCase()), JSON.stringify(text));
+    t.eq(printedBankAccounts("Account no: ACC-44-5566 or ACC 44 5566", onFile), ["ACC-44-5566"], "one entry per account (compared with normId)");
+    t.eq(printedBankAccounts("Pay to 12345678", ["12345678"]), [], "an account on file with no letter gives no shape (it would match any number)");
+    const hostile = `${"account no ".repeat(60_000)}${"ACC-".repeat(60_000)}${"IBAN DE89 ".repeat(40_000)}`;
+    const { ms } = await timed(() => printedBankAccounts(hostile, onFile));
+    t.ok(ms < 1500, `${Math.round(ms)} ms on ${hostile.length} characters`);
+  });
+
   /* ---- hidden values in real PDFs ------------------------------------------------------------------- */
 
   await t.test("a #9-like PDF: the hidden values cannot ground, the truth does", async () => {
@@ -1049,6 +1168,55 @@ export async function run(t: Check): Promise<void> {
     t.ok(r.growthMb < TEXT_WORKER_MAX_GROWTH_MB / 2, `the process grew by ${Math.round(r.growthMb)} MB`);
   });
 
+  await t.test(
+    "fix round SEC-1: a page tree that lists the same child twice per level (2^depth pdf-lib visits) is cut off at the deadline and never blocks the loop",
+    async () => {
+      // 2^24 visits: in-process, pdf-lib's getPageCount blocked the event loop for about 3 s (measured), and the 500 ms
+      // deadline could only answer after it. The structure step now runs in the worker, which is terminated at the deadline.
+      const d24 = pageTreeDag(24);
+      t.ok(d24.length < 4000, `the file is only ${d24.length} bytes`);
+      const cut = await withHeartbeat(() => validateUploadWithin(d24, 500));
+      const f = failure(cut.value);
+      t.eq([f.code, f.outcome, f.reason], ["damaged", "reject", UPLOAD_REASONS.damaged]);
+      t.ok(cut.ms < 1500, `rejected after ${Math.round(cut.ms)} ms (deadline 500 ms)`);
+      t.ok(cut.maxGapMs < 250, `the event loop stalled for ${Math.round(cut.maxGapMs)} ms while pdf-lib walked the page tree`);
+      // 2^40 visits would take days: the same bound holds, and nothing keeps running behind the answer
+      const d40 = await withHeartbeat(() => validateUploadWithin(pageTreeDag(40), 500));
+      t.eq(failure(d40.value).code, "damaged");
+      t.ok(d40.ms < 1500 && d40.maxGapMs < 250, `depth 40: ${Math.round(d40.ms)} ms, longest stall ${Math.round(d40.maxGapMs)} ms`);
+      const after = await timed(() => validateUpload(valid));
+      t.ok(after.value.ok, "a normal upload right after still passes");
+      t.ok(after.ms < 3000, `and is not slowed by a parse left running (${Math.round(after.ms)} ms)`);
+      const shallow = await validateUpload(pageTreeDag(3));
+      t.ok(shallow.ok && shallow.pageCount === 1, "control: the same shape, 8 visits deep, is a valid 1-page PDF (pdf-lib and pdf.js agree)");
+    },
+    { timeoutMs: 60_000 },
+  );
+
+  await t.test(
+    "fix round SEC-1: an object-stream inflate bomb (a 1 KB file, 128 MB inflated while pdf-lib loads) never blocks the loop",
+    async () => {
+      // In-process: a 518 ms stall and +270 MB for 128 MB (1 s and +530 MB for 256 MB), and the file was ACCEPTED. In the
+      // worker the main thread stays responsive; the worker's memory watchdog may stop it (damaged) or it completes.
+      const bomb = objStmBomb(128);
+      t.ok(bomb.length < 2000, `the file is only ${bomb.length} bytes`);
+      const r = await withHeartbeat(() => validateUpload(bomb));
+      t.ok(r.maxGapMs < 250, `the event loop stalled for ${Math.round(r.maxGapMs)} ms while the object stream was inflated`);
+      t.ok(r.value.ok ? r.value.pageCount === 1 : r.value.code === "damaged", `bounded verdict: ${JSON.stringify(r.value.ok ? "ok" : r.value.code)}`);
+      t.ok((await validateUpload(valid)).ok, "a normal upload right after still passes");
+    },
+    { timeoutMs: 60_000 },
+  );
+
+  await t.test("fix round SEC-1: a file of 50,000 invalid objects makes the app print nothing (pdf-lib's warning flood stays in the worker)", async () => {
+    // In-process, pdf-lib printed one console.warn line per invalid object: 100,904 lines (5.3 MB) for this 1 MB upload.
+    const flood = invalidObjectFlood();
+    t.ok(flood.length > 1_000_000 && flood.length < 1_100_000, `${flood.length} bytes`);
+    const { value, lines } = await countingLogs(() => validateUpload(flood));
+    t.eq(lines, 0, "lines printed to console.warn, console.error or stderr while the file was parsed");
+    t.ok(value.ok || value.code === "damaged", "a verdict either way");
+  });
+
   /* ---- security invariant ---------------------------------------------------------------------------------- */
 
   const flaggedScreen: ScreenResult = screenPdf([it("Invoice GLX-310 Total 4,620.00"), it(INJECTION, 1)]);
@@ -1189,6 +1357,16 @@ export async function run(t: Check): Promise<void> {
       if (s.truth.total !== null) t.eq(groundExtraction({ ...s.truth, total: s.truth.total + 12345.67 }, grounding).fields[2].status, "missing", `${s.file}: tampered total`);
       if (s.truth.invoice_number !== null) t.eq(groundExtraction({ ...s.truth, invoice_number: `${s.truth.invoice_number}-X9` }, grounding).fields[0].status, "missing", `${s.file}: tampered number`);
     }
+  });
+
+  await sampleTest("fix round SEC-2: samples: the account printed on each text PDF is its vendor's own, except #6's new one", real.length > 0, "the sample PDFs", () => {
+    const onFile = ["ACC-11-2233", "ACC-44-5566", "ACC-77-8899", "ACC-12-3456", "ACC-99-0000"];
+    for (const s of real) {
+      const printed = printedBankAccounts(buildGroundingText(textsOf(s)), onFile);
+      const want = s.render === "scanned" || s.truth.bank_account === null ? [] : [s.truth.bank_account];
+      t.eq(printed, want, `${s.file}: accounts printed in the visible text`);
+    }
+    t.eq(printedBankAccounts(buildGroundingText(textsOf(real.find((s) => s.id === "06") as RealSample)), onFile), ["ACC-00-9911"], "#6 prints the new account");
   });
 
   await sampleTest("samples: #9's fooled extraction (total 400, PO-1003) fails grounding; the truth passes", nine !== undefined, "09-prompt-injection.pdf", () => {

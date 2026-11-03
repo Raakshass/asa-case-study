@@ -81,6 +81,8 @@ export interface Failure {
   status: number;
   error: string;
   retryAfterSec?: number;
+  /** the browser stopped waiting (its own timeout): the server may still be working on the request */
+  timedOut?: true;
 }
 
 /**
@@ -97,6 +99,23 @@ export function startFailureMessage(failure: Failure): string {
     return `The server had a problem and could not start the run (HTTP ${failure.status}). Try again in a moment.`;
   }
   return failure.error;
+}
+
+/**
+ * How the reset form reads a failed POST /api/reset. A timeout of the browser's own is NOT a failure: the server
+ * waits for the runs already queued and then wipes, and keeps going after the browser stops waiting (routes-ui
+ * ROUTE-1: the form said "Reset failed" while the reset finished seconds later). Everything else is a failure with
+ * resetFailureMessage's sentence.
+ */
+export function resetOutcomeOf(failure: Failure): { kind: "pending" | "failed"; message: string } {
+  if (failure.timedOut === true) {
+    return {
+      kind: "pending",
+      message:
+        "The server is still finishing the runs that were already queued; the reset follows them and completes by itself. Wait a minute before starting new runs: the dashboard then lists only the 4 pre-loaded records.",
+    };
+  }
+  return { kind: "failed", message: resetFailureMessage(failure) };
 }
 
 /** The message under the reset form when POST /api/reset failed. */

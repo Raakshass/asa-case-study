@@ -50,7 +50,8 @@ export function SampleCard({ sample, disabled, starting, onPick }: SampleCardPro
       data-sample={sample.file}
       onClick={() => onPick(sample)}
       className={cn(
-        "group flex h-full w-full flex-col gap-3 rounded-xl bg-card p-4 text-left text-card-foreground ring-1 ring-foreground/10 transition-colors",
+        // flex-1: the card fills its grid cell (a column flex box), with room under it for a failed start's message
+        "group flex w-full flex-1 flex-col gap-3 rounded-xl bg-card p-4 text-left text-card-foreground ring-1 ring-foreground/10 transition-colors",
         "hover:bg-accent/40 hover:ring-primary/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
         "disabled:cursor-not-allowed disabled:opacity-60",
         starting && "bg-accent/40 ring-primary/40 disabled:opacity-100",
@@ -88,12 +89,31 @@ export function SampleCard({ sample, disabled, starting, onPick }: SampleCardPro
   );
 }
 
+/**
+ * Why the pressed card could not start its run (a 429 with its wait, a 5xx, no connection), right under that card:
+ * above the grid it was off screen for most cards (routes-ui UI-2). It is an alert (announced), and it is scrolled
+ * into view only as far as needed when it appears, so the visitor keeps their place.
+ */
+function CardProblem({ title, message }: { title: string; message: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.scrollIntoView?.({ block: "nearest" });
+  }, [title, message]);
+  return (
+    <div ref={ref} data-sample-problem="true">
+      <ErrorState title={title} message={message} />
+    </div>
+  );
+}
+
 export interface SampleSectionProps {
   /** A run is being started (an upload or any sample): every card is switched off. */
   disabled: boolean;
   /** The file name of the sample being started, or null. */
   startingFile: string | null;
   onPick: (sample: SampleListItem) => void;
+  /** A failed start of one sample: shown under that sample's card. */
+  problem?: { file: string; title: string; message: string } | null;
 }
 
 /**
@@ -101,7 +121,7 @@ export interface SampleSectionProps {
  * Shows a skeleton while loading, an error with a retry button when the list cannot be loaded, and a note
  * when the server has no sample files.
  */
-export function SampleSection({ disabled, startingFile, onPick }: SampleSectionProps) {
+export function SampleSection({ disabled, startingFile, onPick, problem = null }: SampleSectionProps) {
   const [retrying, setRetrying] = useState(false);
   const { data, error, loading, refresh } = usePoll((signal) => unwrap(getSamples(signal)), { intervalMs: 0 });
 
@@ -143,8 +163,9 @@ export function SampleSection({ disabled, startingFile, onPick }: SampleSectionP
   return (
     <ul className={GRID}>
       {data.map((sample) => (
-        <li key={sample.file}>
+        <li key={sample.file} className="flex flex-col gap-2">
           <SampleCard sample={sample} disabled={disabled} starting={startingFile === sample.file} onPick={onPick} />
+          {problem !== null && problem.file === sample.file ? <CardProblem title={problem.title} message={problem.message} /> : null}
         </li>
       ))}
     </ul>

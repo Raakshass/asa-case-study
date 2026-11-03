@@ -650,6 +650,33 @@ async function pipelineGroup(t: Check): Promise<void> {
     t.eq([steps[1].status, steps[3].status], ["fail", "fail"], "the screen and the grounding check each catch it");
   });
 
+  await t.test("fix round SEC-2: a model that leaves out the NEW bank account printed on the invoice cannot get it approved: the visible text is checked too", async () => {
+    // Sample 6 prints "Account no: ACC-00-9911" (Northwind's account on file is ACC-44-5566). A fooled model reports no
+    // bank account and nothing suspicious; before the fix the vendor stage passed ("the invoice prints no bank account").
+    const dropBank: ExtractFn = async (pdf, opts) => {
+      const ex = await mockExtract(pdf, opts);
+      return ex.ok ? { ...ex, data: { ...ex.data, bank_account: null, notes: "" } } : ex;
+    };
+    const rig = makeRig();
+    const id = rig.run(sampleBytes("06-bank-change.pdf"));
+    await enqueue(id, rig.deps({ extract: dropBank }));
+    const run = runRow(rig.db, id);
+    const vendorStep = stepRows(rig.db, id)[5];
+    t.eq(JSON.parse(run.extraction ?? "{}").bank_account, null, "the extraction really has no bank account");
+    t.eq([run.decision, run.security_flag], ["HOLD", 0]);
+    t.eq([vendorStep.status, vendorStep.severity, vendorStep.reason], ["fail", "hold", "Bank details differ from vendor master; call +1 415 555 0102 (number on file) to verify. Do not use contact details from the invoice."]);
+    t.eq(run.next_action, "Call the vendor on +1 415 555 0102 to verify new bank details before any payment.");
+    t.eq(JSON.parse(vendorStep.detail ?? "{}").printed_accounts, ["••••9911"], "only the masked account is kept");
+    const shown = JSON.stringify(stepRows(rig.db, id));
+    t.ok(!shown.includes("ACC-00-9911") && !shown.includes("ACC009911"), "the steps never repeat the new account in full (only its masked tail)");
+    t.ok(!`${run.decision_reasons} ${run.next_action}`.includes("9911"), "the reasons and the next action do not mention it at all");
+    // control: the same model on sample 1 (which prints Northwind's own account) still approves
+    const id1 = rig.run(sampleBytes("01-happy-northwind.pdf"));
+    await enqueue(id1, rig.deps({ extract: dropBank }));
+    t.eq(runRow(rig.db, id1).decision, "APPROVE", "sample 1 prints the account on file");
+    t.includes(stepRows(rig.db, id1)[5].reason, "the bank account matches the vendor master");
+  });
+
   await t.test("steps are written live, the extraction is persisted right after stage 3 and a suggestion's cost is added", async () => {
     const rig = makeRig();
     const id = rig.run(sampleBytes("05-scanned-no-po.pdf"), "05.pdf");
@@ -1990,6 +2017,39 @@ async function resetGroup(t: Check): Promise<void> {
     },
     { timeoutMs: 30_000 },
   );
+
+  await t.test("fix round ROUTE-1: when the browser stops waiting for a reset (its own 60 s timer), the form says it is still resetting, not that it failed", async () => {
+    // The reset form's own code (src/components/shared/api.ts resetDemo and start/upload-rules.ts resetOutcomeOf), with a
+    // server that never answers: the browser's 60 s timer is shortened for the test, the server keeps working.
+    const api = load<typeof import("../src/components/shared/api")>("src/components/shared/api");
+    const rules = load<typeof import("../src/components/start/upload-rules")>("src/components/start/upload-rules");
+    const realFetch = globalThis.fetch;
+    const realSetTimeout = globalThis.setTimeout;
+    let calls = 0;
+    globalThis.fetch = ((_url: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        calls++;
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")), { once: true });
+      })) as typeof fetch;
+    globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => realSetTimeout(fn, ms === 60_000 ? 30 : ms, ...rest)) as typeof setTimeout;
+    let result: Awaited<ReturnType<typeof api.resetDemo>>;
+    try {
+      result = await api.resetDemo(RESET_TOKEN);
+    } finally {
+      globalThis.fetch = realFetch;
+      globalThis.setTimeout = realSetTimeout;
+    }
+    t.eq(calls, 1, "one request was sent to the (stubbed) server");
+    if (result.ok) return t.fail("a server that never answers cannot succeed");
+    t.eq([result.status, result.timedOut], [0, true], "the browser's own timeout is reported as such");
+    const shown = rules.resetOutcomeOf(result);
+    t.eq(shown.kind, "pending", "not 'Reset failed'");
+    t.includes(shown.message, "still finishing the runs that were already queued");
+    // real failures stay failures
+    t.eq(rules.resetOutcomeOf({ status: 403, error: "Forbidden" }), { kind: "failed", message: "The reset was refused. The token is wrong, or reset is turned off on this server." });
+    t.eq(rules.resetOutcomeOf({ status: 0, error: "Could not reach the server. Check your connection and try again." }).kind, "failed", "no response at all is a failure");
+    t.eq(rules.resetOutcomeOf({ status: 500, error: "x" }).kind, "failed");
+  });
 }
 
 /* ================================================================================================

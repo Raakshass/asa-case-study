@@ -505,3 +505,72 @@ export function groundExtraction(extraction: InvoiceExtraction, visible: string 
   const fields = GROUNDED_FIELDS.map((field) => ground(field, extraction[field]));
   return { fields, misses: fields.filter((f) => f.status === "missing").map(missReason) };
 }
+
+/* ------------------------------------------------------------------------------------------------
+ * Bank accounts printed on the page (stage 6, fix round SEC-2)
+ * ---------------------------------------------------------------------------------------------- */
+
+/** Zero-width and other format characters: dropped before the account scan (they would split a number in two). */
+const FORMAT_CHARS = /[\p{Cf}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2800}]/gu;
+/**
+ * A label after which a document prints an account number: "Account no", "Account number", "Acct. #", "A/C no.",
+ * "Account:", "Bank account:", "IBAN". ("Account name:" and "Accounts Payable" are not labels.)
+ */
+const ACCOUNT_LABEL = /\b(?:(?:account|acct\.?|a\/c)[ \t]*(?:no\b\.?|number\b|num\b\.?|#)[ \t]*[:#.]?|(?:bank[ \t]+)?account[ \t]*:|(iban)\b[ \t]*[:#.]?)[ \t]*/giu;
+/** What follows the label: one token, then more groups on the same line only when they start with a digit ("12 3456 7890"). */
+const ACCOUNT_VALUE = /^[A-Z0-9][A-Z0-9\-/.]*(?:[ \t][0-9][A-Z0-9\-/.]*)*/iu;
+/**
+ * An IBAN as printed after its label: country, check digits, then up to 8 groups of letters and digits ("GB29 NWBK
+ * 6016 1331 9268 19"). Greedy with no condition after it, so it never backtracks; a word that follows on the same
+ * line may be taken in too, which can only make the value differ from the account on file (a HOLD, never an approval).
+ */
+const IBAN_VALUE = /^[A-Z]{2}\d{2}(?:[ \t]?[A-Z0-9]{1,4}){1,8}/iu;
+const MAX_PRINTED_ACCOUNTS = 10;
+const MAX_ACCOUNT_CHARS = 40;
+
+/** A regex for the SHAPE of an account on file: its letters as they are, any digit for a digit, an optional separator for anything else. */
+function accountShape(onFile: string): RegExp | null {
+  const value = onFile.normalize("NFKC").trim();
+  if (!/[A-Za-z]/.test(value) || !/\d/.test(value) || value.length > MAX_ACCOUNT_CHARS) return null; // digits only would match any number
+  let body = "";
+  for (const ch of value) {
+    if (/[A-Za-z]/.test(ch)) body += ch;
+    else if (/\d/.test(ch)) body += "\\d";
+    else body += "[\\s\\-./]?";
+  }
+  return new RegExp(`(?<![\\p{L}\\p{N}])${body}(?![\\p{L}\\p{N}])`, "giu");
+}
+
+/**
+ * Account numbers printed in the visible text (pass buildGroundingText: tiny text is already gone), so the bank check
+ * does not rest on the model alone (SEC-2: a model that obeyed a hidden note and left bank_account empty got an
+ * invoice printing a NEW account approved). Two readings, both deterministic and linear:
+ *  - the value after an account label ("Account no: ACC-00-9911", "Account number 1234 5678", "IBAN DE89 3704 ...");
+ *  - anything shaped like an account on file (its letters, digits and separators), e.g. "ACC-00-9911" next to
+ *    "ACC-44-5566", wherever it stands. An account on file with no letter gives no shape (it would match any number).
+ * A value needs at least 4 digits. Returns the values as printed (one line, at most 40 characters), one per account
+ * (compared with normId), at most 10. checkVendor compares them with the vendor's account on file.
+ */
+export function printedBankAccounts(text: string, accountsOnFile: readonly (string | null)[] = []): string[] {
+  const clean = (typeof text === "string" ? text : "").normalize("NFKC").replace(FORMAT_CHARS, "").replace(DASH_LIKE, "-");
+  const found = new Map<string, string>();
+  const keep = (raw: string) => {
+    const value = raw.trim().replace(/[.\-/]+$/, "");
+    const key = normId(value);
+    if (value.length > MAX_ACCOUNT_CHARS || (key.match(/\d/g) ?? []).length < 4 || found.has(key) || found.size >= MAX_PRINTED_ACCOUNTS) return;
+    found.set(key, value);
+  };
+  for (const m of clean.matchAll(ACCOUNT_LABEL)) {
+    const after = clean.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 2 * MAX_ACCOUNT_CHARS);
+    const value = (m[1] !== undefined ? IBAN_VALUE : ACCOUNT_VALUE).exec(after);
+    if (value) keep(value[0]);
+  }
+  const shapes = new Map<string, RegExp>();
+  for (const onFile of accountsOnFile) {
+    if (typeof onFile !== "string") continue;
+    const shape = accountShape(onFile);
+    if (shape) shapes.set(shape.source, shape);
+  }
+  for (const shape of shapes.values()) for (const m of clean.matchAll(shape)) keep(m[0]);
+  return [...found.values()];
+}

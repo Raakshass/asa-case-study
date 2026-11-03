@@ -18,8 +18,9 @@
  *
  * Sections: reset (clean slate), plan (the Phase 5 curl checks), samples (all 10 by POST + polling), files, headers,
  * lists (runs, KPIs, master, samples), abuse (traversal, bad hash, .txt renamed .pdf, same file twice, 413, 12 rapid
- * uploads -> 429 after 10), worker (a PDF that keeps pdf.js busy for seconds does not stall the server: the upload's
- * text read runs in the worker thread), reset-guard (403 and 200), log (optional).
+ * uploads -> 429 after 10), worker (a PDF that keeps pdf.js busy for seconds, and one whose page tree keeps pdf-lib busy
+ * for minutes, do not stall the server: the upload's whole parse runs in the worker thread), reset-guard (403 and 200),
+ * log (optional).
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -199,6 +200,7 @@ const IP = {
   dup: ipOf(13),
   junk: ipOf(14),
   worker: ipOf(16),
+  workerTree: ipOf(17),
 };
 
 async function uniquePdf(label: string): Promise<Uint8Array> {
@@ -645,6 +647,60 @@ async function sectionWorker(): Promise<void> {
     const worst = Math.max(...latencies);
     ok(latencies.length >= 5 && worst < 1000, `${latencies.length} requests answered during the ${took} ms parse, the slowest in ${Math.round(worst)} ms`);
   });
+  await check(S, "fix round SEC-1: a ~3 KB page tree that keeps pdf-lib busy for minutes does not stall the server and is cut off at the 10 s deadline", async () => {
+    // 2^32 page-tree visits in pdf-lib's getPageCount: in-process that froze every request for many minutes (13 s at 2^26,
+    // measured). The structure step now runs in the worker thread with the text read, terminated at the upload deadline.
+    const file = pageTreeDagPdf(32);
+    ok(file.length < 5000, `the file is only ${file.length} bytes`);
+    const res = await upload(file, "page-tree.pdf", IP.workerTree);
+    eq(res.status, 202, "upload accepted");
+    const id = (res.json as { runId: string }).runId;
+    for (let i = 0; ; i++) {
+      const status = (await getRun(id, IP.workerTree)).steps[0]?.status;
+      if (status === "running") break;
+      if (status !== "pending" || i > 2400) fail(`the ingest stage never ran (status ${status})`);
+      await sleep(25);
+    }
+    const latencies: number[] = [];
+    for (;;) {
+      const t0 = performance.now();
+      eq((await http("/api/samples", { ip: IP.workerTree })).status, 200, "GET /api/samples while the file is parsed");
+      latencies.push(performance.now() - t0);
+      if ((await getRun(id, IP.workerTree)).steps[0]?.status !== "running") break;
+      await sleep(100);
+    }
+    const run = await waitDone(id, IP.workerTree);
+    const ingest = run.steps[0];
+    eq([run.decision, ingest.status, ingest.reason], ["REJECT", "fail", "PDF is damaged or unreadable"], "rejected as damaged at the deadline");
+    const took = Date.parse(ingest.finished_at ?? "") - Date.parse(ingest.started_at ?? "");
+    ok(took < 15_000, `the ingest stage took ${took} ms (the upload deadline is 10 s)`);
+    const worst = Math.max(...latencies);
+    ok(latencies.length >= 5 && worst < 1000, `${latencies.length} requests answered during the ${took} ms parse, the slowest in ${Math.round(worst)} ms`);
+  });
+}
+
+/** A ~3 KB PDF whose page tree lists the same child twice per level, `depth` levels deep: 2^depth pdf-lib visits, 1 real page. */
+function pageTreeDagPdf(depth: number): Uint8Array {
+  const objects: string[] = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+    "<< /Length 0 >>\nstream\n\nendstream",
+  ];
+  for (let i = 0; i <= depth; i++) {
+    const self = 5 + i;
+    objects.push(`<< /Type /Pages /Parent ${i === 0 ? 2 : self - 1} 0 R /Kids [${i < depth ? `${self + 1} 0 R ${self + 1} 0 R` : ""}] /Count 0 >>`);
+  }
+  let pdf = "%PDF-1.7\n";
+  const offsets: number[] = [];
+  objects.forEach((o, i) => {
+    offsets.push(pdf.length);
+    pdf += `${i + 1} 0 obj\n${o}\nendobj\n`;
+  });
+  const xref = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("")}`;
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return new Uint8Array(Buffer.from(pdf, "latin1"));
 }
 
 /** Optional: the server's own log. */

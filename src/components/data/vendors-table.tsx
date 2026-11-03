@@ -42,7 +42,8 @@ export interface VendorsTableProps {
 
 /**
  * The vendors the rules know: name (with the aliases they also match), the approved badge, the masked bank account
- * and the phone number on file (the one used to verify a bank change). Server-safe.
+ * and the phone number on file (the one used to verify a bank change); below 768 px the account and phone are
+ * repeated under the name. Server-safe.
  */
 export function VendorsTable({ vendors }: VendorsTableProps) {
   return (
@@ -75,6 +76,13 @@ export function VendorsTable({ vendors }: VendorsTableProps) {
                     Also matched as: {vendor.aliases.join(", ")}
                   </span>
                 ) : null}
+                {/* Below 768 px the bank and phone columns are off the edge of the table's scroll frame: repeat them here (UI-1). */}
+                <span data-vendor-inline="true" className="flex flex-col gap-0.5 text-xs whitespace-normal text-muted-foreground md:hidden">
+                  <span>
+                    Bank on file: <MaskedAccount value={vendor.bank_account_masked} />
+                  </span>
+                  <span>Phone on file: {vendor.phone_on_file ? <span className="tabular-nums">{vendor.phone_on_file}</span> : "none"}</span>
+                </span>
               </div>
             </TableCell>
             <TableCell className="px-3 py-3">

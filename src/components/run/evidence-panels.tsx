@@ -513,7 +513,68 @@ function PriceTable({ lines }: { lines: Record<string, unknown>[] }) {
   );
 }
 
+/** "34", "2.5", "200,000": an invoice quantity as plain text. */
+function quantityText(n: number | null): string {
+  return n === null ? "–" : n.toLocaleString("en-US", { maximumFractionDigits: 4 });
+}
+
+/** What the invoice bills against each PO line, in units and value, next to what the line orders (fix round DEC-1). */
+function LineTotalsTable({ totals }: { totals: Record<string, unknown>[] }) {
+  return (
+    <TableFrame label="Billed against each PO line">
+      <TableHeader>
+        <TableRow className="bg-muted/50 hover:bg-muted/50">
+          <TableHead scope="col" className={HEAD}>
+            PO line
+          </TableHead>
+          <TableHead scope="col" className={cn(HEAD, "text-right")}>
+            Ordered
+          </TableHead>
+          <TableHead scope="col" className={cn(HEAD, "text-right")}>
+            Billed
+          </TableHead>
+          <TableHead scope="col" className={HEAD}>
+            Result
+          </TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {totals.map((line, i) => {
+          const within = asBool(line.within_tolerance) !== false;
+          const billedQuantity = asNumber(line.billed_quantity);
+          const lines = asNumber(line.invoice_lines);
+          const tone = within ? "approve" : "reject";
+          const Icon = within ? Check : X;
+          const why = asBool(line.quantity_over) === true ? "More units than ordered" : "Billed above the line's value";
+          return (
+            <TableRow key={i}>
+              <TableCell className={CELL}>
+                {displayText(line.po_description, 80) || "–"}
+                {lines !== null && lines > 1 ? <span className="block text-xs text-muted-foreground">{`${lines} invoice lines`}</span> : null}
+              </TableCell>
+              <TableCell className={cn(CELL, "text-right tabular-nums")}>
+                {`${quantityText(asNumber(line.po_quantity))} for ${formatMoney(asNumber(line.po_amount), null) ?? "–"}`}
+              </TableCell>
+              <TableCell className={cn(CELL, "text-right tabular-nums")}>
+                {`${billedQuantity === null ? "no quantity" : quantityText(billedQuantity)} for ${formatMoney(asNumber(line.billed_amount), null) ?? "–"}`}
+              </TableCell>
+              <TableCell className={CELL}>
+                <span className={cn("inline-flex items-start gap-1.5", INK_TONE[tone])}>
+                  <Icon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+                  <span>{within ? "Within what the PO line orders" : why}</span>
+                </span>
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </TableFrame>
+  );
+}
+
 const AMOUNTS_USED = new Set([
+  "line_totals",
+  "line_totals_within_tolerance",
   "po_number",
   "po_subtotal",
   "already_approved",
@@ -550,6 +611,7 @@ function amountsCurated(detail: Record<string, unknown>): Curated {
   const lines = (Array.isArray(detail.lines) ? detail.lines : []).filter(isRecord).slice(0, 25);
   const unmatched = (Array.isArray(detail.unmatched_lines) ? detail.unmatched_lines : []).filter(isRecord).slice(0, 25);
   const unmatchedTotal = asNumber(detail.unmatched_total);
+  const lineTotals = (Array.isArray(detail.line_totals) ? detail.line_totals : []).filter(isRecord).slice(0, 25);
   const toleranceText = tolerance === null ? "the" : formatPercent(tolerance);
 
   const money = (n: number) => formatMoney(n, null) ?? String(n);
@@ -602,6 +664,11 @@ function amountsCurated(detail: Record<string, unknown>): Curated {
             <PriceTable lines={lines} />
           </Block>
         ) : null}
+        {lineTotals.length > 0 ? (
+          <Block title="Units and amounts against each PO line">
+            <LineTotalsTable totals={lineTotals} />
+          </Block>
+        ) : null}
         {unmatched.length > 0 ? (
           <Block title="Billed lines that match no PO line">
             <TableFrame label="Lines that are not on the PO">
@@ -630,7 +697,7 @@ function amountsCurated(detail: Record<string, unknown>): Curated {
         {detail.tax_inclusive === true ? (
           <p className="text-sm text-muted-foreground">The invoice amounts include tax, but the PO is pre-tax, so the comparison is conservative.</p>
         ) : null}
-        {ledger === null && lines.length === 0 && unmatched.length === 0 ? (
+        {ledger === null && lines.length === 0 && unmatched.length === 0 && lineTotals.length === 0 ? (
           <p className="text-sm text-muted-foreground">There was no PO balance to check this invoice against.</p>
         ) : null}
       </>
@@ -642,23 +709,27 @@ function amountsCurated(detail: Record<string, unknown>): Curated {
 /* ------------------------------------------------------------------------------------------------ stage 9: duplicate */
 
 function duplicateCurated(detail: Record<string, unknown>): Curated {
-  const used = new Set(["match", "recurring", "original_decision", "days_apart", "window_days"]);
+  const used = new Set(["match", "recurring", "original_decision", "days_apart", "window_days", "lookalike"]);
   const match = isRecord(detail.match) ? detail.match : null;
   const recurring = isRecord(detail.recurring) ? detail.recurring : null;
   if (match) {
     const hard = match.kind === "hard";
+    const lookalike = !hard && detail.lookalike === true;
     const number = displayText(match.invoice_number, 60) || "an earlier invoice";
     const date = displayText(match.invoice_date, 20);
     const daysApart = asNumber(detail.days_apart);
     const windowDays = asNumber(detail.window_days);
     const earlier = asString(detail.original_decision);
+    const apart = daysApart !== null ? ` The two are ${daysApart} ${daysApart === 1 ? "day" : "days"} apart.` : "";
     return {
       node: (
         <Callout tone={hard ? "reject" : "hold"} icon={<Copy />} title={hard ? `Duplicate of ${number}` : `Possible duplicate of ${number}`}>
           <p>
             {hard
               ? "The invoice number is the same as an earlier invoice from this vendor once formatting is ignored (a hyphen, a space, upper or lower case)."
-              : `Same vendor and the same amount as the earlier invoice${daysApart !== null ? `, ${daysApart} ${daysApart === 1 ? "day" : "days"} apart` : ", close in time"} (the window is ${windowDays ?? 7} days), but a different invoice number.`}
+              : lookalike
+                ? `The invoice number differs from an earlier invoice of this vendor only by look-alike characters (the letter O for zero, I or L for one) or by leading zeros, whatever the amount and the date.${apart}`
+                : `Same vendor and the same amount as the earlier invoice${daysApart !== null ? `, ${daysApart} ${daysApart === 1 ? "day" : "days"} apart` : ", close in time"} (the window is ${windowDays ?? 7} days), but a different invoice number.`}
           </p>
           <dl className="grid gap-x-4 gap-y-1 sm:grid-cols-[minmax(8rem,12rem)_minmax(0,1fr)]">
             <dt className="text-muted-foreground">Earlier invoice</dt>

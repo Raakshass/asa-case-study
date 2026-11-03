@@ -206,19 +206,24 @@ export function checkIngest(upload: UploadValidation, fileHash: string, snapshot
  * Stage 3. !ok -> status "error": billing_auth -> "LLM provider unavailable (billing/auth)", unreadable ->
  * "Could not read invoice, manual entry required". ok with non-empty suspicious_content -> fail/hold with
  * a reason containing "suspicious" that quotes the content. Else pass. detail: ExtractDetail.
+ * Fix round: an error step also records `failure_kind` (billing_auth | unreadable), so nextAction() can tell an
+ * outage that a re-run fixes from a document nobody could read (DRILL-2).
  */
 export function checkExtract(result: ExtractResult): StepResult {
   if (!result.ok) {
     return {
       status: "error",
       reason: result.kind === "billing_auth" ? "LLM provider unavailable (billing/auth)" : "Could not read invoice, manual entry required",
-      detail: detailOf<ExtractDetail>({
-        model: result.model,
-        latency_ms: result.latencyMs,
-        cost_usd: result.costUsd,
-        attempts: result.attempts,
-        suspicious_content: [],
-      }),
+      detail: detailOf<ExtractDetail>(
+        {
+          model: result.model,
+          latency_ms: result.latencyMs,
+          cost_usd: result.costUsd,
+          attempts: result.attempts,
+          suspicious_content: [],
+        },
+        { failure_kind: result.kind === "billing_auth" ? "billing_auth" : "unreadable" },
+      ),
     };
   }
   const suspicious = Array.isArray(result.data.suspicious_content) ? result.data.suspicious_content : [];
@@ -475,10 +480,25 @@ export function checkNormalize(normalized: NormalizedInvoice): StepResult {
  * its masked form is kept as evidence).
  * Two refinements of the plan, both HOLD not REJECT because the vendor is not known to be unknown: no
  * readable vendor name, and a name that matches more than one vendor in the master (never guessed).
+ * Fix round (additive, docs/CONTRACT_CHANGES.md):
+ * - A document that is not an invoice (statement, receipt, other, credit note) from a vendor that is not in the
+ *   master is a warn/info note, and one that names no vendor is skipped: nothing is paid on such a document and
+ *   validate already HOLDs it ("not an invoice"), so it is not REJECTed for onboarding (DRILL-1). A known vendor
+ *   that is not approved still rejects, a bank mismatch still holds, an ambiguous name still holds.
+ * - `printedAccounts` (optional 4th argument): account numbers found in the document's VISIBLE text by
+ *   guardrails.printedBankAccounts (null or omitted for a scan). One that is not the bank account on file is a
+ *   bank mismatch too, even when the model reported no account or the master's (SEC-2): the bank-change HOLD no
+ *   longer rests on a field only the model reads.
  */
-export function checkVendor(extraction: InvoiceExtraction, normalized: NormalizedInvoice, snapshot: Snapshot): VendorOutcome {
+export function checkVendor(
+  extraction: InvoiceExtraction,
+  normalized: NormalizedInvoice,
+  snapshot: Snapshot,
+  printedAccounts?: readonly string[] | null,
+): VendorOutcome {
   const vendor = normalized.vendor_id === null ? null : (snapshot.vendors.find((v) => v.id === normalized.vendor_id) ?? null);
   const printedName = normalized.vendor_name ?? (blank(extraction.vendor_name) ? null : extraction.vendor_name);
+  const notInvoice = (extraction.document_type as string) !== "invoice";
 
   if (vendor === null) {
     if (normalized.vendor_id === null) {
@@ -494,6 +514,15 @@ export function checkVendor(extraction: InvoiceExtraction, normalized: Normalize
         };
       }
       if (matches.length === 0 && (printedName === null || normalized.vendor_name_norm === null)) {
+        if (notInvoice) {
+          return {
+            status: "skipped",
+            reason: "Skipped: this document is not an invoice and names no vendor, so there is no vendor to check.",
+            detail: { vendor_id: null, bank_mismatch: false },
+            vendor: null,
+            bankMismatch: false,
+          };
+        }
         return {
           status: "fail",
           severity: "hold",
@@ -503,6 +532,16 @@ export function checkVendor(extraction: InvoiceExtraction, normalized: Normalize
           bankMismatch: false,
         };
       }
+    }
+    if (notInvoice) {
+      return {
+        status: "warn",
+        severity: "info",
+        reason: `Vendor "${clip(printedName, 80)}" is not in the vendor master; it is not routed to onboarding because this document is not an invoice.`,
+        detail: { vendor_id: null, bank_mismatch: false },
+        vendor: null,
+        bankMismatch: false,
+      };
     }
     return {
       status: "fail",
@@ -516,7 +555,10 @@ export function checkVendor(extraction: InvoiceExtraction, normalized: Normalize
 
   const printedBank = normalized.bank_account_norm ?? (blank(extraction.bank_account) ? null : normId(extraction.bank_account ?? "") || null);
   const bankOnFile = blank(vendor.bank_account) ? null : normId(vendor.bank_account ?? "") || null;
-  const bankMismatch = printedBank !== null && printedBank !== bankOnFile;
+  // Account numbers printed in the visible text, whatever the model reported (SEC-2).
+  const seen = [...new Set((Array.isArray(printedAccounts) ? printedAccounts : []).map((a) => (typeof a === "string" ? normId(a) : "")).filter((a) => a !== ""))].slice(0, 10);
+  const strangers = seen.filter((a) => a !== bankOnFile);
+  const bankMismatch = (printedBank !== null && printedBank !== bankOnFile) || strangers.length > 0;
   const detail = {
     vendor_id: vendor.id,
     vendor_name: vendor.name,
@@ -525,6 +567,7 @@ export function checkVendor(extraction: InvoiceExtraction, normalized: Normalize
     invoice_bank: maskAccount(printedBank === null ? null : (extraction.bank_account ?? printedBank)),
     master_bank: maskAccount(vendor.bank_account),
     phone_on_file: vendor.phone_on_file,
+    ...(Array.isArray(printedAccounts) ? { printed_accounts: seen.map((a) => maskAccount(a)), printed_account_differs: strangers.length > 0 } : {}),
   };
 
   if (!vendor.approved) {
@@ -546,7 +589,7 @@ export function checkVendor(extraction: InvoiceExtraction, normalized: Normalize
         : `${differ}; call ${phone} (number on file) to verify. Do not use contact details from the invoice.`;
     return { status: "fail", severity: "hold", reason, detail, vendor, bankMismatch };
   }
-  const bankNote = printedBank === null ? "; the invoice prints no bank account" : " and the bank account matches the vendor master";
+  const bankNote = printedBank === null && seen.length === 0 ? "; the invoice prints no bank account" : " and the bank account matches the vendor master";
   return { status: "pass", reason: `Vendor ${vendor.name} is approved${bankNote}.`, detail, vendor, bankMismatch };
 }
 
@@ -822,14 +865,61 @@ interface UnmatchedLine {
 }
 
 /**
+ * What this invoice bills against ONE PO line, summed over every invoice line that pairs with it (DEC-1): a unit
+ * price check alone let 34 toners through on a 20-toner line, a toner line with no quantity, and an add-on whose
+ * description contains the PO line's words ("... laptop extended warranty") as long as the PO total had room.
+ */
+interface LineTotal {
+  po_description: string;
+  /** what the PO line orders */
+  po_quantity: number;
+  po_amount: number;
+  /** summed over the paired invoice lines; null when one of them prints no quantity (the amount still counts) */
+  billed_quantity: number | null;
+  billed_amount: number;
+  /** how many invoice lines pair with this PO line */
+  invoice_lines: number;
+  /** more units billed than ordered, beyond the tolerance (not judged for a lump-sum line of quantity 1) */
+  quantity_over: boolean;
+  /** billed amount over the PO line's amount as a fraction, e.g. 0.7 (<= 0 when not over) */
+  amount_over_pct: number;
+  within_tolerance: boolean;
+}
+
+/** 34 -> "34", 2.5 -> "2.5", 200000 -> "200,000" (an invoice quantity, at most 4 decimals). */
+const QUANTITY = new Intl.NumberFormat("en-US", { maximumFractionDigits: 4 });
+function quantityLabel(n: number): string {
+  return finite(n) ? QUANTITY.format(n) : "an unreadable quantity";
+}
+
+/**
+ * A percentage over a limit, never printed as the limit itself: +2.01% must not read "+2.0%, above the 2%
+ * tolerance" (DEC-10). One decimal, more only when that one would round down to the tolerance.
+ */
+function overPctLabel(fraction: number, beyond: boolean): string {
+  const tolerance = CONFIG.priceTolerancePct * 100;
+  for (let digits = 1; digits <= 4; digits++) {
+    const text = (fraction * 100).toFixed(digits);
+    if (!beyond || Number.parseFloat(text) > tolerance) return `${text}%`;
+  }
+  return `${(fraction * 100).toFixed(4)}%`;
+}
+
+/**
  * Every invoice line against the PO's lines. A line that pairs gets its unit price variance (exact prices, no
  * rounding to cents: the 2% is a ratio, RT-RULES-05); one that pairs with a $0 PO line ("included") is over by
  * whatever it bills. A billed line that pairs with nothing is collected as unmatched instead of being dropped
  * (RT-RULES-03). Under-billing is never flagged; lines with no positive amount bill nothing.
+ * Every billed line that pairs with a priced PO line also counts toward that line's total (quantity and amount,
+ * DEC-1), whether or not a unit price can be worked out for it.
  */
-function compareLines(extraction: InvoiceExtraction, po: PurchaseOrder): { checks: LineCheck[]; unmatched: UnmatchedLine[]; billed: number } {
+function compareLines(
+  extraction: InvoiceExtraction,
+  po: PurchaseOrder,
+): { checks: LineCheck[]; unmatched: UnmatchedLine[]; billed: number; totals: LineTotal[] } {
   const checks: LineCheck[] = [];
   const unmatched: UnmatchedLine[] = [];
+  const sums = new Map<PoLine, { quantity: number; quantityKnown: boolean; amount: number; lines: number }>();
   let billed = 0;
   for (const li of Array.isArray(extraction.line_items) ? extraction.line_items : []) {
     const amount = finite(li.amount) && li.amount > 0 ? li.amount : 0;
@@ -839,6 +929,14 @@ function compareLines(extraction: InvoiceExtraction, po: PurchaseOrder): { check
     if (poLine === null) {
       if (amount > 0) unmatched.push({ description: clip(description, 60) || "(no description)", amount: round2(amount) });
       continue;
+    }
+    if (amount > 0 && finite(poLine.amount) && poLine.amount > 0) {
+      const sum = sums.get(poLine) ?? { quantity: 0, quantityKnown: true, amount: 0, lines: 0 };
+      sum.amount += amount;
+      sum.lines += 1;
+      if (finite(li.quantity) && li.quantity > 0) sum.quantity += li.quantity;
+      else sum.quantityKnown = false;
+      sums.set(poLine, sum);
     }
     const effective = unitPriceOf(li);
     const base = { description: clip(description, 60), po_description: clip(poLine.description, 60) };
@@ -860,7 +958,27 @@ function compareLines(extraction: InvoiceExtraction, po: PurchaseOrder): { check
       within_tolerance: ratio <= CONFIG.priceTolerancePct + 1e-9,
     });
   }
-  return { checks, unmatched, billed: round2(billed) };
+  const totals: LineTotal[] = [...sums].map(([poLine, sum]) => {
+    const billedAmount = round2(sum.amount);
+    const billedQuantity = sum.quantityKnown ? round6(sum.quantity) : null;
+    // A lump sum (quantity 1, CONTRACTS 3.1) has no units to count: only its amount is compared.
+    const countsUnits = finite(poLine.quantity) && poLine.quantity > 1;
+    const quantityOver = countsUnits && billedQuantity !== null && billedQuantity > poLine.quantity * (1 + CONFIG.priceTolerancePct) + 1e-9;
+    const amountOver = round2(billedAmount - poLine.amount);
+    const amountFails = amountOver > 0 && !withinTolerance(amountOver, poLine.amount);
+    return {
+      po_description: clip(poLine.description, 60),
+      po_quantity: poLine.quantity,
+      po_amount: poLine.amount,
+      billed_quantity: billedQuantity,
+      billed_amount: billedAmount,
+      invoice_lines: sum.lines,
+      quantity_over: quantityOver,
+      amount_over_pct: Math.round((amountOver / poLine.amount) * 10000) / 10000,
+      within_tolerance: !quantityOver && !amountFails,
+    };
+  });
+  return { checks, unmatched, billed: round2(billed), totals };
 }
 
 /** One reason sentence for a unit price above its PO line's. */
@@ -869,8 +987,23 @@ function priceSentence(c: LineCheck, po: PurchaseOrder, tolerance: string): stri
   if (c.po_unit_price <= 0) {
     return `"${c.description}" is billed at ${unitMoney(c.invoice_unit_price)} a unit, but ${po.po_number} lists "${c.po_description}" at $0.00 (included at no charge)${derived}.`;
   }
-  const pct = c.over_pct === null ? "" : `+${formatPct(c.over_pct)}, `;
+  const pct = c.over_pct === null ? "" : `+${overPctLabel(c.over_by / c.po_unit_price, !c.within_tolerance)}, `;
   return `Unit price for "${c.description}" is ${unitMoney(c.invoice_unit_price)} vs ${unitMoney(c.po_unit_price)} on ${po.po_number} (${pct}${c.within_tolerance ? "within" : "above"} the ${tolerance} tolerance${derived}).`;
+}
+
+/** One reason sentence for a PO line that this invoice bills beyond what was ordered (DEC-1). */
+function lineTotalSentence(t: LineTotal, po: PurchaseOrder, tolerance: string): string {
+  const billed =
+    t.billed_quantity === null ? `${money(t.billed_amount)} with no quantity printed` : `${quantityLabel(t.billed_quantity)} for ${money(t.billed_amount)}`;
+  const across = t.invoice_lines > 1 ? ` on ${t.invoice_lines} invoice lines` : "";
+  const amountBeyond = t.amount_over_pct > 0 && !withinTolerance(round2(t.billed_amount - t.po_amount), t.po_amount);
+  const why = [
+    t.quantity_over ? "more units than ordered" : null,
+    amountBeyond ? `+${overPctLabel(round2(t.billed_amount - t.po_amount) / t.po_amount, true)} over the line's value` : null,
+  ]
+    .filter((x): x is string => x !== null)
+    .join(" and ");
+  return `"${t.po_description}" on ${po.po_number}: ${quantityLabel(t.po_quantity)} ordered for ${money(t.po_amount)}, but this invoice bills ${billed}${across} (${why}, above the ${tolerance} tolerance).`;
 }
 
 /** How many approved invoice numbers the evidence keeps (a blanket PO can have hundreds, RT-RULES-08). */
@@ -895,6 +1028,12 @@ const MAX_LISTED_INVOICES = 20;
  * lines that are not on the PO are listed (unmatched_lines) and hold when they are more than the tolerance share
  * of the billed lines, and a line the PO includes at $0 that is billed holds (RT-RULES-03); the approved invoices
  * named in the reason and kept in detail are capped (approved_invoice_count keeps the total, RT-RULES-08).
+ * Fix round (DEC-1): the invoice lines that pair with one PO line are added up. More units than that PO line orders
+ * (beyond the 2% tolerance; a lump-sum line of quantity 1 is judged on its amount only), or a billed amount more than
+ * 2% above the PO line's amount, holds: extra units, a line with no quantity and an add-on whose description contains
+ * the PO line's words are no longer approved just because the PO total has room. detail.line_totals /
+ * line_totals_within_tolerance carry the evidence. A tax-inclusive invoice whose price is above the PO's says next to
+ * the price sentence that its prices include tax (DEC-5).
  */
 export function checkAmounts(
   extraction: InvoiceExtraction,
@@ -930,13 +1069,22 @@ export function checkAmounts(
   const overPct = overBy !== null && remaining > 0 ? Math.round((overBy / remaining) * 10000) / 10000 : null;
   const within = overBy === null || withinTolerance(overBy, remaining);
   const tolerance = pctLabel(CONFIG.priceTolerancePct);
-  const { checks: lineChecks, unmatched, billed } = compareLines(extraction, po);
+  const { checks: lineChecks, unmatched, billed, totals: lineTotals } = compareLines(extraction, po);
   // Lines priced above the PO's. The ones beyond the tolerance come first: they are what holds the invoice.
   const above = lineChecks.filter((c) => c.over_by > 0).sort((a, b) => Number(a.within_tolerance) - Number(b.within_tolerance));
   const priceFails = above.some((c) => !c.within_tolerance);
   const lineNotes = above.map((c) => priceSentence(c, po, tolerance));
   const shownNotes = lineNotes.slice(0, 3);
   if (lineNotes.length > shownNotes.length) shownNotes.push(`${lineNotes.length - shownNotes.length} more line prices are above the PO's.`);
+  // A tax-inclusive invoice is compared as printed (the PO is pre-tax): a price above the PO's says so next to it (DEC-5).
+  const taxPriceNote = extraction.tax_inclusive === true && above.length > 0 ? "The invoice prices include tax and the PO prices are pre-tax, so they are compared as printed." : null;
+  const priceSentences = taxPriceNote === null ? shownNotes : [...shownNotes, taxPriceNote];
+
+  // What this invoice bills against each PO line, in quantity and in value (DEC-1).
+  const overLines = lineTotals.filter((x) => !x.within_tolerance);
+  const totalsFail = overLines.length > 0;
+  const totalSentences = overLines.slice(0, 3).map((x) => lineTotalSentence(x, po, tolerance));
+  if (overLines.length > totalSentences.length) totalSentences.push(`${overLines.length - totalSentences.length} more PO lines are billed beyond what was ordered.`);
 
   // Billed lines that are not on the PO at all: more than the tolerance (as a share of the billed lines) holds.
   const unmatchedTotal = round2(unmatched.reduce((sum, u) => sum + u.amount, 0));
@@ -960,14 +1108,20 @@ export function checkAmounts(
       `Exceeds remaining PO balance by ${money(overBy)}. ${po.po_number}: ${money(po.subtotal)} total, ${money(balance.invoiced)} already approved${approved}, ${money(remaining)} remaining.` +
       ` Invoice ${wanted.label} ${money(wanted.amount)} is more than the ${tolerance} tolerance over the remaining balance.`;
   }
-  const failed = balanceFails || priceFails || unmatchedFails;
+  const failed = balanceFails || priceFails || unmatchedFails || totalsFail;
   const status: ResultStatus = failed ? "fail" : overBy !== null || lineNotes.length > 0 || unmatched.length > 0 ? "warn" : "pass";
   const severity: Severity | undefined = failed ? "hold" : status === "warn" ? "info" : undefined;
-  // reasons[0] must explain the decision: what fails leads (balance, then prices, then lines not on the PO).
-  const decisive = [...(balanceFails ? [balanceSentence] : []), ...(priceFails ? shownNotes : []), ...(unmatchedFails && unmatchedSentence ? [unmatchedSentence] : [])];
-  const rest = [...(balanceFails ? [] : [balanceSentence]), ...(priceFails ? [] : shownNotes), ...(!unmatchedFails && unmatchedSentence ? [unmatchedSentence] : [])];
+  // reasons[0] must explain the decision: what fails leads (balance, then prices, then quantities and values per PO
+  // line, then lines not on the PO).
+  const decisive = [
+    ...(balanceFails ? [balanceSentence] : []),
+    ...(priceFails ? priceSentences : []),
+    ...totalSentences,
+    ...(unmatchedFails && unmatchedSentence ? [unmatchedSentence] : []),
+  ];
+  const rest = [...(balanceFails ? [] : [balanceSentence]), ...(priceFails ? [] : priceSentences), ...(!unmatchedFails && unmatchedSentence ? [unmatchedSentence] : [])];
   const parts = [...decisive, ...rest];
-  if (extraction.tax_inclusive && overBy !== null) parts.push("The invoice amounts include tax, the PO is pre-tax.");
+  if (extraction.tax_inclusive && overBy !== null && taxPriceNote === null) parts.push("The invoice amounts include tax, the PO is pre-tax.");
 
   return {
     status,
@@ -995,6 +1149,8 @@ export function checkAmounts(
         lines: lineChecks,
         unmatched_lines: unmatched,
         unmatched_total: unmatchedTotal,
+        line_totals: lineTotals,
+        line_totals_within_tolerance: !totalsFail,
       },
     ),
     remaining,
@@ -1017,6 +1173,41 @@ function rowAmount(row: SnapshotInvoice): number | null {
   if (finite(row.subtotal)) return round2(row.subtotal);
   if (finite(row.total)) return round2(row.total);
   return null;
+}
+
+type ChargeClass = "charge" | "credit";
+
+/**
+ * Credit notes are compared with credit notes and invoices with invoices (DEC-3): a credit note that carries the
+ * number of the invoice it credits is not a second charge. This document: a credit when it says it is a credit note
+ * or its amount is negative. An earlier row (the invoices table keeps no document type): by the sign of its amount,
+ * or null when it has none (null matches either, so a row without amounts still matches by number).
+ */
+function chargeClassOf(extraction: InvoiceExtraction): ChargeClass {
+  const amount = invoiceAmount(extraction)?.amount ?? null;
+  return extraction.document_type === "credit_note" || (amount !== null && amount < 0) ? "credit" : "charge";
+}
+function rowClassOf(row: SnapshotInvoice): ChargeClass | null {
+  const amount = rowAmount(row);
+  return amount === null ? null : amount < 0 ? "credit" : "charge";
+}
+
+/**
+ * An invoice number as a person reads it (DEC-2): NFKC, upper case, split into its alphanumeric parts; the letter O
+ * read as 0 and I or L as 1; zeros that only pad a run of digits dropped; the parts joined. "INV-O042", "INV-42",
+ * "INV-00042" and "1NV-0042" all read as INV-0042 ("1NV42"); "INV-0043" and "INV-0042A" do not. normalizeInvoiceNumber
+ * (the hard key) stays as it is; this second key only HOLDs.
+ */
+function lookalikeKey(printed: string | null): string | null {
+  if (printed === null) return null;
+  const parts = printed
+    .normalize("NFKC")
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter((p) => p !== "")
+    .map((p) => p.replace(/O/g, "0").replace(/[IL]/g, "1").replace(/\d+/g, (run) => run.replace(/^0+(?=\d)/, "")));
+  const key = parts.join("");
+  return key === "" ? null : key;
 }
 
 /**
@@ -1044,6 +1235,11 @@ function sameCharge(extraction: InvoiceExtraction, wanted: { amount: number }, r
  * apart -> pass with a reason containing "recurring pattern, not a duplicate". Skipped when the vendor is
  * not known. detail: DuplicateDetail. "Same amount" compares like with like (sameCharge, RT-RULES-02):
  * subtotals when both invoices printed one, totals when either did not.
+ * Fix round: skipped for a statement, receipt or other non-invoice document (nothing is paid on it, so it repeats
+ * nothing; validate HOLDs it); a credit note is compared only with earlier credits and an invoice only with earlier
+ * charges (chargeClassOf, DEC-3); after the hard rule, a number that differs from an earlier one only by look-alike
+ * characters or zero padding (lookalikeKey) is fail/hold, kind "soft", detail.lookalike true, whatever the amount and
+ * the date (DEC-2).
  */
 export function checkDuplicate(
   extraction: InvoiceExtraction,
@@ -1059,9 +1255,18 @@ export function checkDuplicate(
     kind: null,
   });
   if (vendor === null) return none("skipped", "Skipped: the vendor is not known, so there are no earlier invoices to compare with.");
+  const type: string = extraction.document_type;
+  if (type !== "invoice" && type !== "credit_note") {
+    return none("skipped", "Skipped: this document is not an invoice, so it is not compared with earlier invoices.");
+  }
 
+  const incoming = chargeClassOf(extraction);
   const earlier = snapshot.invoices
     .filter((i) => i.vendor_id === vendor.id && !i.run_had_error && (i.decision === "APPROVE" || i.decision === "HOLD"))
+    .filter((i) => {
+      const cls = rowClassOf(i);
+      return cls === null || cls === incoming;
+    })
     .sort(byAge);
   const key = normalized.invoice_number_norm;
   const printed = normalized.invoice_number ?? extraction.invoice_number;
@@ -1083,6 +1288,25 @@ export function checkDuplicate(
       ),
       duplicateOf: hard,
       kind: "hard",
+    };
+  }
+
+  // A number that only LOOKS different (O for 0, I or L for 1, zero padding): held whatever the amount and the date (DEC-2).
+  const look = key === null ? null : lookalikeKey(printed);
+  const twin = look === null ? undefined : earlier.find((i) => rowKey(i) !== key && lookalikeKey(i.invoice_number ?? i.invoice_number_norm) === look);
+  if (twin) {
+    const original = clip(twin.invoice_number ?? twin.invoice_number_norm ?? twin.id, 60);
+    const days = daysApart(normalized.invoice_date, twin.invoice_date);
+    return {
+      status: "fail",
+      severity: "hold",
+      reason: `Possible duplicate of ${original} (dated ${twin.invoice_date ?? "unknown"}): the invoice number "${clip(printed, 40)}" differs from it only by look-alike characters (O for 0, I or L for 1) or leading zeros.`,
+      detail: detailOf<DuplicateDetail>(
+        { match: { kind: "soft", invoice_number: twin.invoice_number, invoice_date: twin.invoice_date, run_id: twin.run_id ?? twin.id }, recurring: null },
+        { lookalike: true, days_apart: days, original_decision: twin.decision },
+      ),
+      duplicateOf: twin,
+      kind: "soft",
     };
   }
 
@@ -1193,12 +1417,17 @@ function needsManualEntry(step: StepResult): boolean {
   return !Array.isArray(kinds) || kinds.includes("extraction");
 }
 
+/**
+ * The printed due date, else invoice date + payment terms. A printed due date BEFORE the invoice date (validate notes
+ * it: a misread or a typo) is not used, so payment is never scheduled as if it were already overdue (DEC-9).
+ */
 function queueForPayment(ctx: DecisionContext): string {
   const printedDue = normalizeDate(ctx.extraction?.due_date ?? null);
-  if (printedDue !== null) return `Queue for payment on due date ${printedDue}.`;
   const invoiceDate = ctx.normalized?.invoice_date ?? normalizeDate(ctx.extraction?.invoice_date ?? null);
+  if (printedDue !== null && (invoiceDate === null || printedDue >= invoiceDate)) return `Queue for payment on due date ${printedDue}.`;
   if (invoiceDate !== null) {
-    return `Queue for payment on due date ${addDaysIso(invoiceDate, CONFIG.paymentTermsDays)} (${CONFIG.paymentTermsDays} days after the invoice date).`;
+    const ignored = printedDue !== null ? `; the printed due date ${printedDue} is before the invoice date, so it is not used` : "";
+    return `Queue for payment on due date ${addDaysIso(invoiceDate, CONFIG.paymentTermsDays)} (${CONFIG.paymentTermsDays} days after the invoice date${ignored}).`;
   }
   return `Queue for payment on the standard ${CONFIG.paymentTermsDays}-day terms.`;
 }
@@ -1211,6 +1440,10 @@ function queueForPayment(ctx: DecisionContext): string {
  * over an APPROVE passed in by mistake. After the plan's rows, an ingest failure gets its own advice (ask
  * for a valid or unlocked PDF); a soft duplicate says "check whether this repeats" rather than "already
  * processed". Fallback: "Review the reasons above."
+ * Fix round: an extraction that failed because the AI service was unavailable (billing/auth) says a re-run works
+ * (DRILL-2); a vendor that could not be resolved on a non-invoice document no longer means manual entry, so the
+ * document routes by its type (DRILL-1); more units or value on a PO line than ordered (DEC-1) and a tax-inclusive
+ * price above the PO's (DEC-5) get their own amounts advice.
  */
 export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionContext): string {
   if (isSecurityFlagged(steps, ctx)) {
@@ -1247,8 +1480,17 @@ export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionCont
   // extraction failed / low confidence (also an unreadable or ambiguous vendor name). A validate failure counts only
   // when one of its problems is about reading the document: a future date or the vendor's own arithmetic is not
   // fixed by re-keying and falls through to the PO / amounts advice or the fallback (red team RT-RULES-07).
+  // A non-invoice document routes by its type even when its vendor could not be resolved (CONTRACTS 4.3 #8, DRILL-1).
   const documentType = ctx.extraction?.document_type ?? "invoice";
-  if (steps.extract?.status === "error" || (steps.validate?.status === "fail" && documentType === "invoice" && needsManualEntry(steps.validate)) || vendorFailed) {
+  if (steps.extract?.status === "error" && (steps.extract.detail as { failure_kind?: unknown } | undefined)?.failure_kind === "billing_auth") {
+    // nothing was read because the AI reading service was unavailable: a re-run works once it is back (DRILL-2)
+    return "Re-run this invoice once the AI reading service is available again, or enter it manually.";
+  }
+  if (
+    steps.extract?.status === "error" ||
+    (steps.validate?.status === "fail" && documentType === "invoice" && needsManualEntry(steps.validate)) ||
+    (vendorFailed && documentType === "invoice")
+  ) {
     return "Manual data entry required.";
   }
   // document type
@@ -1267,14 +1509,36 @@ export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionCont
   }
   // amounts
   if (needsAttention(steps.amounts)) {
-    const detail = steps.amounts.detail as { over_by?: unknown; within_tolerance?: unknown; price_within_tolerance?: unknown; unmatched_within_tolerance?: unknown } | undefined;
+    const detail = steps.amounts.detail as
+      | {
+          over_by?: unknown;
+          within_tolerance?: unknown;
+          price_within_tolerance?: unknown;
+          unmatched_within_tolerance?: unknown;
+          line_totals_within_tolerance?: unknown;
+          tax_inclusive?: unknown;
+        }
+      | undefined;
     const overBy = ctx.amounts?.overBy ?? detail?.over_by ?? null;
-    // Over the remaining balance beyond the tolerance, or only a unit price above the PO's, or lines not on the PO.
+    // Over the remaining balance beyond the tolerance, or only a unit price above the PO's, or lines not on the PO,
+    // or more units / value on a PO line than it orders (DEC-1).
     if (finite(overBy) && overBy > 0 && detail?.within_tolerance !== true) {
       return `Ask the buyer for a PO amendment or the vendor for a credit of ${money(overBy)}.`;
     }
-    if (detail?.within_tolerance === true && detail.price_within_tolerance !== false && detail.unmatched_within_tolerance === false) {
-      return "Ask the buyer whether the items that are not on the PO were ordered (PO amendment), or the vendor for a corrected invoice.";
+    const priceFailed = detail?.price_within_tolerance === false;
+    const unmatchedFailed = detail?.unmatched_within_tolerance === false;
+    const totalsFailed = detail?.line_totals_within_tolerance === false;
+    if (detail?.within_tolerance === true && !priceFailed && (unmatchedFailed || totalsFailed)) {
+      if (!totalsFailed) return "Ask the buyer whether the items that are not on the PO were ordered (PO amendment), or the vendor for a corrected invoice.";
+      if (!unmatchedFailed) return "Ask the buyer whether the extra units or items billed against the PO lines were ordered (PO amendment), or the vendor for a corrected invoice.";
+      return "Ask the buyer whether the extra units and the items that are not on the PO were ordered (PO amendment), or the vendor for a corrected invoice.";
+    }
+    if (detail?.within_tolerance === true && priceFailed && detail.tax_inclusive === true) {
+      // the prices include tax and the PO is pre-tax: the difference may be only the tax (DEC-5)
+      return "Check the pre-tax prices: the invoice prices include tax and the PO is pre-tax. Ask the vendor for an invoice with prices before tax, or the buyer for a PO amendment if the higher price is agreed.";
+    }
+    if (detail?.within_tolerance === true && totalsFailed) {
+      return "Ask the vendor for a corrected invoice, or the buyer for a PO amendment if the higher unit price and the extra units are agreed.";
     }
     return detail?.within_tolerance === true
       ? "Ask the vendor for a corrected invoice, or the buyer for a PO amendment if the higher unit price is agreed."

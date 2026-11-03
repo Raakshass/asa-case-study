@@ -14,7 +14,7 @@ import fs from "node:fs";
 import { CONFIG, paths, uploadPath } from "./config";
 import { type DB, INTERRUPTED_NEXT_ACTION, getDb } from "./db";
 import { PROMPT_VERSION, getExtractor, getSuggestPo } from "./extract";
-import { buildGroundingText, checkScreen, groundExtraction, screenPdf } from "./guardrails";
+import { buildGroundingText, checkScreen, groundExtraction, printedBankAccounts, screenPdf } from "./guardrails";
 import { insertInvoice, loadSnapshot } from "./master";
 import { normalizeInvoice } from "./normalize";
 import { validateUpload } from "./pdf";
@@ -469,8 +469,16 @@ async function execute(deps: PipelineDeps, run: RunRow): Promise<void> {
       if (normalized === null) {
         skip(range("vendor", "duplicate"), "Skipped: the normalize stage failed");
       } else {
-        // 6 vendor
-        vendor = await stage<VendorOutcome>("vendor", () => checkVendor(data, normalized, snapshot), (v) => v);
+        // 6 vendor: the bank account the model read AND any account number printed in the visible text (a text PDF) are
+        // compared with the one on file, so the bank-change hold does not rest on the model alone (fix round SEC-2)
+        vendor = await stage<VendorOutcome>(
+          "vendor",
+          () => {
+            const printed = isImageOnly ? null : printedBankAccounts(buildGroundingText(textItems), snapshot.vendors.map((v) => v.bank_account));
+            return checkVendor(data, normalized, snapshot, printed);
+          },
+          (v) => v,
+        );
         const knownVendor = vendor?.vendor ?? null;
 
         // 7 po_match (a suggestion's cost is added to the run)

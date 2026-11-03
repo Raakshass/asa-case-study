@@ -28,6 +28,7 @@ const LABELS: Record<string, string> = {
   cost_usd: "Cost",
   attempts: "Attempts",
   suspicious_content: "Reported by the model as suspicious",
+  failure_kind: "Why nothing was read",
   servedBy: "Served by",
   ok: "Succeeded",
   failure: "Failure",
@@ -74,6 +75,8 @@ const LABELS: Record<string, string> = {
   master_bank: "Bank account on file",
   phone_on_file: "Phone number on file",
   ambiguous_vendor_ids: "Vendors with a matching name",
+  printed_accounts: "Account numbers printed on the document",
+  printed_account_differs: "A printed account differs from the one on file",
   // po_match
   po_number: "PO number",
   inferred: "PO inferred (not printed on the invoice)",
@@ -104,6 +107,15 @@ const LABELS: Record<string, string> = {
   lines: "Unit prices against the PO",
   unmatched_lines: "Lines that are not on the PO",
   unmatched_total: "Total of the lines not on the PO",
+  line_totals: "Billed against each PO line",
+  line_totals_within_tolerance: "Units and amounts within each PO line",
+  po_quantity: "Ordered quantity",
+  po_amount: "Ordered amount",
+  billed_quantity: "Billed quantity",
+  billed_amount: "Billed amount",
+  invoice_lines: "Invoice lines",
+  quantity_over: "More units than ordered",
+  amount_over_pct: "Billed amount against the PO line",
   description: "Description",
   po_description: "PO line",
   invoice_unit_price: "Invoice unit price",
@@ -118,6 +130,7 @@ const LABELS: Record<string, string> = {
   days_apart: "Days apart",
   window_days: "Duplicate window (days)",
   original_decision: "Decision on the earlier invoice",
+  lookalike: "Numbers differ only by look-alike characters",
   // decide
   reasons: "Reasons",
   next_action: "Next action",
@@ -162,6 +175,8 @@ const KINDS: Record<string, ValueKind> = {
   over_by: "money",
   amount: "money",
   unmatched_total: "money",
+  po_amount: "money",
+  billed_amount: "money",
   line_sum: "money",
   expected_total: "money",
   pretax_amount: "money",
@@ -172,6 +187,7 @@ const KINDS: Record<string, ValueKind> = {
   po_unit_price: "precise-money",
   unit_price: "precise-money",
   over_pct: "percent",
+  amount_over_pct: "percent",
   tolerance_pct: "percent",
   confidence: "confidence",
   latency_ms: "duration",
@@ -182,6 +198,7 @@ const KINDS: Record<string, ValueKind> = {
   textChars: "count",
   page_count: "count",
   approved_invoice_count: "count",
+  invoice_lines: "count",
   days_apart: "count",
   window_days: "count",
   promptTokens: "count",
@@ -231,6 +248,10 @@ const WORDS: Record<string, Record<string, string>> = {
     invalid_output: "Invalid output",
   },
   suggestion_failure: { billing_auth: "Billing or authorization", failed: "The suggestion failed" },
+  failure_kind: {
+    billing_auth: "The AI reading service was unavailable (no API key, or its credit limit was reached); a re-run works once it is back",
+    unreadable: "The document could not be read",
+  },
   problem_kinds: {
     extraction: "Reading the document",
     document_type: "Kind of document",
@@ -266,10 +287,15 @@ export function boolEmphasis(key: string, value: boolean): Emphasis | null {
     case "within_tolerance":
     case "price_within_tolerance":
     case "unmatched_within_tolerance":
+    case "line_totals_within_tolerance":
     case "ok":
       return value ? "good" : "bad";
     case "bank_mismatch":
+    case "printed_account_differs":
+    case "quantity_over":
       return value ? "bad" : "good";
+    case "lookalike":
+      return value ? "warn" : null;
     case "inferred":
       return value ? "warn" : null;
     case "security_flag":

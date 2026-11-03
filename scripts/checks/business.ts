@@ -569,7 +569,9 @@ export async function run(t: Check): Promise<void> {
     t.eq([billing.status, billing.severity, billing.reason], ["error", undefined, "LLM provider unavailable (billing/auth)"]);
     const unreadable = checkExtract({ ok: false, kind: "unreadable", message: "x", model: "m", costUsd: 0.5, latencyMs: 9, attempts: [] });
     t.eq([unreadable.status, unreadable.severity, unreadable.reason], ["error", undefined, "Could not read invoice, manual entry required"]);
-    t.eq(unreadable.detail, { model: "m", latency_ms: 9, cost_usd: 0.5, attempts: [], suspicious_content: [] });
+    // (fix round DRILL-2: the error detail also says which failure it was, so the next action can tell an outage apart)
+    t.eq(unreadable.detail, { model: "m", latency_ms: 9, cost_usd: 0.5, attempts: [], suspicious_content: [], failure_kind: "unreadable" });
+    t.eq(billing.detail?.failure_kind, "billing_auth");
   });
 
   await t.test("checkExtract: no suspicious content passes; any suspicious content fails/hold and quotes it", () => {
@@ -1129,6 +1131,8 @@ export async function run(t: Check): Promise<void> {
       lines: [],
       unmatched_lines: [],
       unmatched_total: 0,
+      line_totals: [],
+      line_totals_within_tolerance: true,
     });
     const exactly = await amountsFor(seededSnapshot(), consulting(13800));
     t.eq([exactly.status, exactly.overBy], ["pass", null], "using exactly what remains is fine");
@@ -1949,6 +1953,188 @@ export async function run(t: Check): Promise<void> {
     t.eq(r.detail?.approved_invoice_count, 365);
     const two = await amountsFor(base, ex({ vendor_name: "Globex Logistics Ltd", bank_account: "ACC-77-8899", po_reference: "PO-1003", line_items: [{ description: "Freight services Q4 (lump sum)", quantity: 1, unit_price: 9000, amount: 9000 }], subtotal: 9000, tax: 900, total: 9900 }));
     t.includes(two.reason, "(GLX-301, GLX-302)", "a short list is unchanged");
+  });
+
+  /* ---------------------------------------------------------------------------- fix-round regressions (review findings) */
+
+  await t.test("fix round DEC-1: what an invoice bills against one PO line (units and value) is capped by that line; extra units, no quantity and add-ons that pair hold", async () => {
+    // PO-1007 orders 20 toners for $1,700.00 (and 50 paper boxes); the PO total ($2,900.00) has room for $2,890.00 of toner.
+    const toner = (lines: InvoiceExtraction["line_items"], no = "INV-0077") => {
+      const subtotal = round(lines.reduce((s, l) => s + l.amount, 0));
+      return acme({ invoice_number: no, po_reference: "PO-1007", line_items: lines, subtotal, tax: 0, total: subtotal });
+    };
+    const a = await runStages(seededSnapshot(), toner([{ description: "Toner cartridge", quantity: 34, unit_price: 85, amount: 2890 }]));
+    t.eq(a.result.decision, "HOLD", `34 toners on a 20-toner line: ${JSON.stringify(a.result.reasons)}`);
+    t.eq([a.steps.amounts?.status, a.steps.amounts?.severity, a.amounts?.overBy], ["fail", "hold", null], "the PO balance is not the problem");
+    t.ok(
+      (a.steps.amounts?.reason ?? "").startsWith('"Toner cartridge" on PO-1007: 20 ordered for $1,700.00, but this invoice bills 34 for $2,890.00 (more units than ordered and +70.0% over the line\'s value, above the 2% tolerance).'),
+      a.steps.amounts?.reason ?? "",
+    );
+    t.eq(a.steps.amounts?.detail?.line_totals_within_tolerance, false);
+    t.eq(a.steps.amounts?.detail?.line_totals, [
+      { po_description: "Toner cartridge", po_quantity: 20, po_amount: 1700, billed_quantity: 34, billed_amount: 2890, invoice_lines: 1, quantity_over: true, amount_over_pct: 0.7, within_tolerance: false },
+    ]);
+    t.eq(a.action, "Ask the buyer whether the extra units or items billed against the PO lines were ordered (PO amendment), or the vendor for a corrected invoice.");
+    // b) no quantity printed, the PO's unit price, $2,890.00; c) no quantity and no price
+    for (const [what, line] of [
+      ["no quantity", { description: "Toner cartridge", quantity: null, unit_price: 85, amount: 2890 }],
+      ["no quantity and no price", { description: "Toner cartridge", quantity: null, unit_price: null, amount: 2890 }],
+    ] as const) {
+      const st = await runStages(seededSnapshot(), toner([{ ...line }]));
+      t.eq(st.result.decision, "HOLD", what);
+      t.includes(st.steps.amounts?.reason, "but this invoice bills $2,890.00 with no quantity printed (+70.0% over the line's value, above the 2% tolerance)", what);
+    }
+    // d) an add-on whose description contains the PO line's words pairs with the laptop line: 20 units on a 12-unit line
+    const warranty = await runStages(
+      seededSnapshot(),
+      ex({
+        invoice_number: "NW-7970",
+        line_items: [
+          { description: "Dell Latitude 5440 laptop", quantity: 10, unit_price: 1150, amount: 11500 },
+          { description: "Dell Latitude 5440 laptop extended warranty 3yr", quantity: 10, unit_price: 230, amount: 2300 },
+        ],
+        subtotal: 13800,
+        tax: 1380,
+        total: 15180,
+      }),
+    );
+    t.eq(warranty.result.decision, "HOLD", "10 laptops + 10 warranties against 12 laptops");
+    t.includes(warranty.steps.amounts?.reason, '"Dell Latitude 5440 laptop" on PO-1002: 12 ordered for $13,800.00, but this invoice bills 20 for $13,800.00 on 2 invoice lines (more units than ordered, above the 2% tolerance).');
+    // controls: what the PO allows still passes
+    const sample2 = await runStages(seededSnapshot(), toner([{ description: "Printer paper box", quantity: 50, unit_price: 24, amount: 1200 }, { description: "Toner cartridge", quantity: 20, unit_price: 86.2, amount: 1724 }]));
+    t.eq([sample2.result.decision, sample2.steps.amounts?.status, sample2.steps.amounts?.detail?.line_totals_within_tolerance], ["APPROVE", "warn", true], "sample 2's shape: 20 of 20 toners, $1,724.00 within 2% of $1,700.00");
+    const split = await runStages(seededSnapshot(), toner([{ description: "Toner cartridge", quantity: 10, unit_price: 85, amount: 850 }, { description: "Toner cartridges", quantity: 10, unit_price: 85, amount: 850 }]));
+    t.eq([split.result.decision, (split.steps.amounts?.detail?.line_totals as { billed_quantity: number }[])[0].billed_quantity], ["APPROVE", 20], "one PO line billed on two invoice lines, 20 of 20");
+    const lumpSum = await runStages(
+      seededSnapshot(),
+      ex({ vendor_name: "Globex Logistics Ltd", bank_account: "ACC-77-8899", invoice_number: "GLX-398", po_reference: "PO-1003", line_items: [{ description: "Freight services Q4 (lump sum)", quantity: 1, unit_price: 2500, amount: 2500 }, { description: "Freight services Q4 (lump sum)", quantity: 1, unit_price: 2500, amount: 2500 }], subtotal: 5000, tax: 500, total: 5500 }),
+    );
+    t.eq(lumpSum.result.decision, "APPROVE", "a lump-sum PO line (quantity 1) is judged on its amount, not on a count of units");
+    t.eq((await runStages(seededSnapshot(), toner([{ description: "Toner cartridge", quantity: 20, unit_price: 144.5, amount: 2890 }]))).result.decision, "HOLD", "control: the same money as a higher unit price holds (as before)");
+  });
+
+  await t.test("fix round DEC-2: an invoice number that differs from an earlier one only by look-alike characters or zero padding is held, whatever the date and the amount", async () => {
+    const lookalike = (printed: string, over: Partial<InvoiceExtraction> = {}) =>
+      acme({ invoice_number: printed, po_reference: "PO-1007", invoice_date: "2026-10-28", due_date: null, line_items: [], subtotal: 2900, tax: 290, total: 3190, ...over });
+    for (const printed of ["INV-O042", "INV-42", "INV-00042", "1NV-0042", "INV-0O42", "lnv-0042"]) {
+      const r = dupFor(seededSnapshot(), lookalike(printed));
+      t.eq([r.status, r.severity, r.kind, r.duplicateOf?.invoice_number], ["fail", "hold", "soft", "INV-0042"], printed);
+      t.eq(r.detail?.lookalike, true, printed);
+      t.includes(r.reason, "Possible duplicate of INV-0042 (dated 2026-10-05)");
+      t.includes(r.reason, "look-alike characters");
+    }
+    const far = dupFor(seededSnapshot(), lookalike("INV-O042", { invoice_date: "2026-12-20", subtotal: 15, tax: 1.5, total: 16.5 }));
+    t.eq(far.kind, "soft", "76 days later and another amount: the number itself is the evidence");
+    const st = await runStages(seededSnapshot(), lookalike("INV-O042"));
+    t.eq([st.result.decision, st.action], ["HOLD", "Do not pay yet. Check with the vendor whether this repeats INV-0042 before any payment."]);
+    // controls: real other numbers, another vendor, a rejected original, the recurring sample 7
+    for (const printed of ["INV-0043", "INV-0042A", "XYZ-777"]) t.eq(dupFor(seededSnapshot(), lookalike(printed)).kind, null, `${printed} is another number`);
+    t.eq(dupFor(seededSnapshot(), ex({ invoice_number: "INV-O042" })).kind, null, "Northwind has no INV-0042");
+    t.eq(dupFor(withRows(seededSnapshot(), row({ id: "rej", run_id: "rej", invoice_number: "INV-0601", invoice_number_norm: "INV0601", decision: "REJECT" })), lookalike("INV-O601")).kind, null, "a rejected invoice may be resubmitted");
+    t.includes(dupFor(seededSnapshot(), acme()).reason, "recurring pattern, not a duplicate", "ST-2026-10 after ST-2026-09 is still a recurring charge");
+    t.eq(dupFor(seededSnapshot(), acme({ invoice_number: "ST-2026-9", invoice_date: "2026-10-31" })).kind, "soft", "ST-2026-9 is ST-2026-09 with its zero dropped");
+  });
+
+  await t.test("fix round DEC-3: a credit note that carries the number of the invoice it credits goes to the credit process; credit notes are compared with credit notes", async () => {
+    const credit = (over: Partial<InvoiceExtraction> = {}) =>
+      acme({ document_type: "credit_note", invoice_number: "INV-0042", invoice_date: "2026-10-28", due_date: null, po_reference: "PO-1001", line_items: [{ description: "Toner cartridge", quantity: -2, unit_price: 85, amount: -170 }], subtotal: -170, tax: -17, total: -187, ...over });
+    for (const [what, e] of [
+      ["negative credit note INV-0042", credit()],
+      ["printed 'inv 0042'", credit({ invoice_number: "inv 0042" })],
+      ["printed with positive amounts", credit({ line_items: [{ description: "Toner cartridge", quantity: 2, unit_price: 85, amount: 170 }], subtotal: 170, tax: 17, total: 187 })],
+    ] as const) {
+      const st = await runStages(seededSnapshot(), e);
+      t.eq([st.result.decision, st.action, st.steps.duplicate?.status], ["HOLD", "Route to credit process.", "pass"], what);
+      t.ok(!st.result.reasons.some((r) => r.includes("Duplicate")), `${what}: ${JSON.stringify(st.result.reasons)}`);
+    }
+    // credit notes still find credit notes, and invoices invoices
+    const cnRow = row({ id: "cn", run_id: "cn", invoice_number: "CN-0042", invoice_number_norm: "CN0042", subtotal: -170, tax: -17, total: -187, decision: "HOLD" });
+    t.eq(dupFor(withRows(seededSnapshot(), cnRow), credit({ invoice_number: "CN-0042" })).kind, "hard", "the same credit note twice");
+    t.eq(dupFor(seededSnapshot(), acme({ invoice_number: "INV0042", subtotal: 2900 })).kind, "hard", "sample 4's re-sent invoice is still a duplicate");
+    t.eq(dupFor(withRows(seededSnapshot(), row({ id: "na", run_id: "na", invoice_number: "INV-0500", invoice_number_norm: "INV0500", subtotal: null, total: null })), acme({ invoice_number: "INV-0500" })).kind, "hard", "a row without amounts still matches by number");
+    t.eq(dupFor(withRows(seededSnapshot(), row({ id: "heldcn", run_id: "heldcn", invoice_number: "INV-0901", invoice_number_norm: "INV0901", subtotal: -100, total: -110, decision: "HOLD" })), acme({ invoice_number: "INV-0901" })).kind, null, "an invoice is not a duplicate of an earlier credit note");
+    const nearCredit = dupFor(seededSnapshot(), acme({ document_type: "credit_note", invoice_number: "CN-77", invoice_date: "2026-10-08", po_reference: null, line_items: [], subtotal: 2900, tax: 290, total: 3190 }));
+    t.eq(nearCredit.kind, null, "a credit note for the same amount near INV-0042 is not a possible duplicate of that invoice");
+    // other documents that carry an invoice's number are not compared at all
+    for (const [type, action] of [["receipt", "Route to document handling."], ["other", "Route to document handling."]] as const) {
+      const st = await runStages(seededSnapshot(), acme({ document_type: type, invoice_number: "INV-0042", invoice_date: "2026-10-28", po_reference: null, subtotal: 2900, tax: 290, total: 3190, line_items: [] }));
+      t.eq([st.result.decision, st.action, st.steps.duplicate?.status], ["HOLD", action, "skipped"], type);
+    }
+  });
+
+  await t.test("fix round DRILL-1: a document that is not an invoice is never rejected for vendor onboarding; it is held and routed by its type", async () => {
+    const routes = [
+      ["other", "Route to document handling."],
+      ["statement", "Route to statement handling."],
+      ["receipt", "Route to document handling."],
+      ["credit_note", "Route to credit process."],
+    ] as const;
+    for (const [type, action] of routes) {
+      const unknown = await runStages(seededSnapshot(), ex({ document_type: type, vendor_name: "Harbor Lane Catering Co.", bank_account: null, invoice_number: null, po_reference: null, line_items: [], subtotal: null, tax: null, total: null }));
+      t.eq([unknown.result.decision, unknown.action], ["HOLD", action], `${type} from an unknown issuer`);
+      t.includes(unknown.result.reasons[0], "not an invoice", `${type}: reasons[0]`);
+      t.eq([unknown.steps.vendor?.status, unknown.steps.vendor?.severity], ["warn", "info"], type);
+      t.includes(unknown.steps.vendor?.reason, "Harbor Lane Catering Co.");
+      t.includes(unknown.steps.vendor?.reason, "not routed to onboarding");
+      const nameless = await runStages(seededSnapshot(), { ...NULLS, document_type: type });
+      t.eq([nameless.result.decision, nameless.action, nameless.steps.vendor?.status], ["HOLD", action, "skipped"], `${type} with no vendor name (the offline mock's answer for any other PDF)`);
+    }
+    // controls: an INVOICE from an unknown vendor and a known vendor that is not approved still reject; a bank change still calls
+    const invoice = await runStages(seededSnapshot(), ex({ vendor_name: "Harbor Lane Catering Co.", bank_account: null }));
+    t.eq([invoice.result.decision, invoice.action], ["REJECT", "Route vendor to onboarding before this can be processed."]);
+    const umbrella = await runStages(seededSnapshot(), ex({ document_type: "other", vendor_name: "Umbrella Consulting", bank_account: null, invoice_number: null, po_reference: null, line_items: [], subtotal: null, tax: null, total: null }));
+    t.eq([umbrella.result.decision, umbrella.action], ["REJECT", "Route vendor to onboarding before this can be processed."]);
+    const letter = await runStages(seededSnapshot(), ex({ document_type: "other", bank_account: "ACC-00-9911", invoice_number: null, po_reference: null, line_items: [], subtotal: null, tax: null, total: null }));
+    t.eq([letter.result.decision, letter.action], ["HOLD", "Call the vendor on +1 415 555 0102 to verify new bank details before any payment."]);
+    const snap = seededSnapshot();
+    snap.vendors.push({ id: "V006", name: "Acme Supplies Corp", aliases: [], approved: true, bank_account: null, phone_on_file: null });
+    const ambiguous = await runStages(snap, { ...NULLS, document_type: "statement", vendor_name: "ACME Supplies" });
+    t.eq([ambiguous.steps.vendor?.status, ambiguous.action], ["fail", "Route to statement handling."], "an ambiguous name on a statement still routes by type (CONTRACTS 4.3 #8)");
+  });
+
+  await t.test("fix round SEC-2: an account number printed in the visible text that is not the one on file holds, whatever the model reported", () => {
+    const snap = seededSnapshot();
+    const withText = (extraction: InvoiceExtraction, printed: string[] | null) => checkVendor(extraction, normalizeInvoice(extraction, snap.vendors), snap, printed);
+    const fooled = withText(ex({ bank_account: null }), ["ACC-00-9911"]);
+    t.eq([fooled.status, fooled.severity, fooled.bankMismatch], ["fail", "hold", true], "the model reported no account, the page prints a new one");
+    t.eq(fooled.reason, "Bank details differ from vendor master; call +1 415 555 0102 (number on file) to verify. Do not use contact details from the invoice.");
+    t.eq([fooled.detail?.printed_accounts, fooled.detail?.printed_account_differs, fooled.detail?.invoice_bank], [["••••9911"], true, null]);
+    t.ok(!JSON.stringify(fooled).includes("ACC-00-9911"), "the new account is never repeated in full");
+    t.eq(withText(ex({ bank_account: "ACC-44-5566" }), ["ACC-44-5566", "ACC-00-9911"]).bankMismatch, true, "the model reported the master's account, the page also prints a new one");
+    const same = withText(ex({ bank_account: null }), ["acc 44 5566"]);
+    t.eq([same.status, same.bankMismatch], ["pass", false]);
+    t.includes(same.reason, "matches the vendor master");
+    t.includes(withText(ex({ bank_account: null }), []).reason, "prints no bank account");
+    t.eq(withText(ex({ bank_account: null }), null).status, "pass", "a scan has no text to read accounts from");
+    const unapproved = withText(ex({ vendor_name: "Umbrella Consulting", bank_account: null }), ["ACC-00-0000"]);
+    t.eq([unapproved.severity, unapproved.bankMismatch], ["reject", true]);
+    t.includes(unapproved.reason, "also differs");
+  });
+
+  await t.test("fix round DEC-5: a tax-inclusive price above the PO's says the prices include tax, in the reason and in the next action", async () => {
+    const inclusive = await runStages(seededSnapshot(), ex({ invoice_number: "NW-7960", line_items: [{ description: "Dell Latitude 5440 laptop", quantity: 2, unit_price: 1265, amount: 2530 }], subtotal: 2530, tax: 230, total: 2530, tax_inclusive: true }));
+    t.eq(inclusive.result.decision, "HOLD", "compared as printed (conservative)");
+    t.includes(inclusive.result.reasons[0], 'Unit price for "Dell Latitude 5440 laptop" is $1,265.00 vs $1,150.00 on PO-1002 (+10.0%, above the 2% tolerance). The invoice prices include tax and the PO prices are pre-tax');
+    t.includes(inclusive.action, "the invoice prices include tax and the PO is pre-tax");
+    const net = await runStages(seededSnapshot(), ex({ invoice_number: "NW-7961", line_items: [{ description: "Dell Latitude 5440 laptop", quantity: 2, unit_price: 1150, amount: 2300 }], subtotal: 2300, tax: 230, total: 2530 }));
+    t.eq(net.result.decision, "APPROVE", "control: the same goods with tax on top");
+  });
+
+  await t.test("fix round DEC-9, DEC-10, DRILL-2: a due date before the invoice date is not used; +2.01% is printed as such; an AI outage says a re-run works", async () => {
+    t.eq(
+      nextAction("APPROVE", {}, emptyCtx({ extraction: ex({ invoice_date: "2026-10-27", due_date: "2026-09-01" }) })),
+      "Queue for payment on due date 2026-11-26 (30 days after the invoice date; the printed due date 2026-09-01 is before the invoice date, so it is not used).",
+    );
+    t.eq(nextAction("APPROVE", {}, emptyCtx({ extraction: ex({ invoice_date: "2026-10-27", due_date: "2026-10-27" }) })), "Queue for payment on due date 2026-10-27.", "a due date on the invoice date is used");
+    const snap = seededSnapshot();
+    const laptop = (price: number) => amountsFor(snap, ex({ line_items: [{ description: "Dell Latitude 5440 laptop", quantity: 1, unit_price: price, amount: price }], subtotal: price, tax: 0, total: price }));
+    t.includes((await laptop(1173.12)).reason, "(+2.01%, above the 2% tolerance)");
+    t.includes((await laptop(1173)).reason, "(+2.0%, within the 2% tolerance)");
+    const billing: ExtractResult = { ok: false, kind: "billing_auth", message: "x", model: null, costUsd: 0, latencyMs: 3, attempts: [] };
+    const outage = await runStages(seededSnapshot(), ex(), { extractResult: billing });
+    t.eq([outage.result.decision, outage.result.reasons[0], outage.action], ["HOLD", "LLM provider unavailable (billing/auth)", "Re-run this invoice once the AI reading service is available again, or enter it manually."]);
+    const unreadable: ExtractResult = { ...billing, kind: "unreadable" };
+    t.eq((await runStages(seededSnapshot(), ex(), { extractResult: unreadable })).action, "Manual data entry required.", "a document nobody could read still means manual entry");
   });
 
   /* ---------------------------------------------------------------------------- whole-chain behaviours */

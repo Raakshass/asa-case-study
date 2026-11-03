@@ -298,8 +298,9 @@ async function runSampleViaUi(page: Page, s: TruthSample, expectedStages: string
 
   // the PDF frame points at the stored file and the file was served as a PDF
   const hash = sampleHash(s);
-  const frame = page.locator(`iframe[src="/api/files/${hash}"]`);
-  eq(await frame.count(), 1, `#${s.id} PDF iframe on /api/files/<hash>`);
+  // (fix round UI-4: the frame opens the viewer without its thumbnail pane, fitted to the width; the fragment is not sent)
+  const frame = page.locator(`iframe[src="/api/files/${hash}#navpanes=0&view=FitH"]`);
+  eq(await frame.count(), 1, `#${s.id} PDF iframe on /api/files/<hash>#navpanes=0&view=FitH`);
   ok((await frame.getAttribute("title"))?.includes("Invoice PDF"), `#${s.id} the frame has a title`);
   for (let i = 0; i < 50 && !watchOf(page).responses.some((r) => r.url === `/api/files/${hash}`); i++) await page.waitForTimeout(100);
   const served = watchOf(page).responses.find((r) => r.url === `/api/files/${hash}`);
@@ -513,6 +514,47 @@ async function sectionNarrow(): Promise<void> {
       eq(takeProblems(page), [], "browser console and network");
     });
   }
+  // fix round UI-1: the column a phone needs most was off the edge of the table's scroll frame (Decision at x=737,
+  // Remaining at x=702 in a 16-359 frame). Each row must show it inside the frame without scrolling the table.
+  await check("narrow", "fix round UI-1: 375 px: each dashboard row shows its decision, and each PO its remaining balance, inside the table's visible frame", async () => {
+    await page.goto(`${BASE}/`);
+    await page.waitForFunction(() => document.querySelectorAll("tr[data-run-id]").length > 0);
+    const rows = await page.evaluate(() => {
+      const frame = document.querySelector('[role="region"][aria-label="Recent runs"]')?.getBoundingClientRect();
+      if (!frame) return null;
+      return Array.from(document.querySelectorAll("tr[data-run-id]")).map((tr) =>
+        Array.from(tr.querySelectorAll("[data-decision]")).some((el) => {
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0 && getComputedStyle(el).display !== "none" && r.left >= frame.left - 1 && r.right <= frame.right + 1;
+        }),
+      );
+    });
+    ok(rows !== null && rows.length > 0, "the Recent runs table is there");
+    eq(rows?.filter((visible) => !visible).length, 0, `rows whose decision is outside the visible frame (of ${rows?.length})`);
+    const master = (await (await page.request.get(`${BASE}/api/master`)).json()) as { purchase_orders: { po_number: string; remaining: number }[] };
+    await page.goto(`${BASE}/data`);
+    await page.locator("tr[data-po]").first().waitFor();
+    const missing: string[] = [];
+    for (const po of master.purchase_orders) {
+      const amount = `$${Math.abs(po.remaining).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      const shown = await page.evaluate(
+        ([poNumber, text]) => {
+          const frame = document.querySelector('[role="region"][aria-label="Purchase orders"]')?.getBoundingClientRect();
+          const tr = document.querySelector(`tr[data-po="${poNumber}"]`);
+          if (!frame || !tr) return false;
+          return Array.from(tr.querySelectorAll("*")).some((el) => {
+            const own = Array.from(el.childNodes).some((n) => n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").includes(text));
+            const r = el.getBoundingClientRect();
+            return own && r.width > 0 && r.height > 0 && r.left >= frame.left - 1 && r.right <= frame.right + 1;
+          });
+        },
+        [po.po_number, amount] as const,
+      );
+      if (!shown) missing.push(`${po.po_number} (${amount})`);
+    }
+    eq(missing, [], "POs whose remaining balance is outside the visible frame");
+    eq(takeProblems(page), [], "browser console and network");
+  });
   await ctx.close();
 }
 
@@ -707,6 +749,47 @@ async function sectionUnhappy(): Promise<void> {
     watchOf(page).allow4xx = [];
   });
   await ctx.close();
+  // fix round UI-2: the message of a failed sample start was rendered ABOVE the grid, off screen for every card below
+  // the first row or two (top -1458 px at 375x812 for the last card, under the sticky header at 1440x900).
+  for (const [width, height] of [
+    [375, 812],
+    [1440, 900],
+  ] as const) {
+    await check("unhappy", `fix round UI-2: ${width}x${height}: a 429 on the LAST sample card shows its message next to that card, in view`, async () => {
+      const ip = nextIp();
+      const narrowCtx = await newContext({ width, height, ip });
+      try {
+        const p = await newPage(narrowCtx);
+        for (let i = 0; i < 10; i++) {
+          const r = await p.request.post(`${BASE}/api/runs`, { headers: { "content-type": "application/json", "x-forwarded-for": ip }, data: '{"sample":"nope"}' });
+          eq(r.status(), 400, `call ${i + 1}`);
+        }
+        watchOf(p).allow4xx = [/^\/api\/runs$/];
+        await p.goto(`${BASE}/runs/new`);
+        const last = samples[samples.length - 1].file;
+        const card = p.locator(`button[data-sample="${last}"]`);
+        await card.waitFor();
+        await card.click(); // Playwright scrolls the card into view, as a visitor would
+        const alert = p.getByRole("alert").filter({ hasText: /Too many runs were started in a short time/ });
+        await alert.waitFor();
+        await p.waitForTimeout(300); // let the scroll into view settle
+        const geometry = await alert.evaluate((el) => {
+          const r = el.getBoundingClientRect();
+          const header = document.querySelector("header");
+          const sticky = header !== null && ["sticky", "fixed"].includes(getComputedStyle(header).position);
+          return { top: r.top, bottom: r.bottom, viewport: window.innerHeight, headerBottom: sticky && header ? header.getBoundingClientRect().bottom : 0 };
+        });
+        ok(geometry.top >= geometry.headerBottom - 1 && geometry.bottom <= geometry.viewport + 1, `the message is in view below the header: ${JSON.stringify(geometry)}`);
+        const cardBox = await card.boundingBox();
+        ok(cardBox !== null && geometry.top >= cardBox.y + cardBox.height - 1 && geometry.top - (cardBox.y + cardBox.height) < 48, `the message sits right under the pressed card (card ${JSON.stringify(cardBox)})`);
+        ok(await card.isEnabled(), "the card can be pressed again");
+        await shot(p, `unhappy-429-last-card-${width}`);
+        eq(takeProblems(p).filter((x) => !/status of 429/.test(x)), [], "browser console and network (the 429 itself aside)");
+      } finally {
+        await narrowCtx.close();
+      }
+    });
+  }
 }
 
 /* ---- XSS: hostile rows written straight into the server's database ---- */

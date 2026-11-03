@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { CircleCheck, LoaderCircle, RotateCcw } from "lucide-react";
+import { CircleCheck, Clock, LoaderCircle, RotateCcw } from "lucide-react";
 import { resetDemo } from "@/components/shared/api";
 import { ErrorState } from "@/components/shared/error-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { SeedCounts } from "@/lib/types";
-import { describeCounts, resetFailureMessage } from "./upload-rules";
+import { describeCounts, resetOutcomeOf } from "./upload-rules";
 
 /** The token lives in sessionStorage for this tab only (plan section 6.8), so a second reset does not ask again. */
 const TOKEN_KEY = "invoice-ap:reset-token";
@@ -36,7 +36,7 @@ function forgetToken(): void {
   }
 }
 
-type Outcome = { kind: "done"; counts: SeedCounts } | { kind: "failed"; message: string };
+type Outcome = { kind: "done"; counts: SeedCounts } | { kind: "failed"; message: string } | { kind: "pending"; message: string };
 
 /**
  * "Reset demo data": a button that reveals an inline form for the reset token (a password field; never
@@ -116,7 +116,8 @@ export function ResetPanel({ className }: { className?: string }) {
         forgetToken();
         setSaved(false);
       }
-      setOutcome({ kind: "failed", message: resetFailureMessage(result) });
+      // a timeout of the browser's own is not a failure: the server finishes the queued runs, then resets (ROUTE-1)
+      setOutcome(resetOutcomeOf(result));
     }
   }
 
@@ -209,6 +210,15 @@ export function ResetPanel({ className }: { className?: string }) {
         {outcome?.kind === "failed" ? (
           <div id={errorId} className="mt-4">
             <ErrorState title="Reset failed" message={outcome.message} />
+          </div>
+        ) : null}
+        {outcome?.kind === "pending" ? (
+          <div role="status" data-reset-pending="true" className="mt-4 rounded-xl border border-hold-border bg-hold-soft p-4">
+            <p className="flex items-center gap-2 font-medium text-hold">
+              <Clock aria-hidden="true" className="size-5 shrink-0" />
+              Still resetting
+            </p>
+            <p className="mt-1 text-sm break-words text-foreground">{outcome.message}</p>
           </div>
         ) : null}
         {outcome?.kind === "done" ? (

@@ -60,6 +60,21 @@ function PoRow({ po }: { po: MasterPo }) {
           <span className="block max-w-[18rem] truncate text-xs text-muted-foreground" title={lines}>
             {lines}
           </span>
+          {/* Below 1024 px the Remaining column is off the edge of the table's scroll frame: repeat it here (UI-1). */}
+          <span data-remaining-inline="true" className="flex flex-wrap items-center gap-1 text-sm lg:hidden">
+            <span className="text-muted-foreground">Remaining</span>
+            {usage.state === "over" ? (
+              <span className="inline-flex items-center gap-1 font-semibold text-reject">
+                <TriangleAlert aria-hidden="true" className="size-3.5 shrink-0" />
+                <span>
+                  over by <Money value={usage.overBy} />
+                </span>
+              </span>
+            ) : (
+              <Money value={po.remaining} className={closed ? "text-muted-foreground" : "font-semibold text-foreground"} />
+            )}
+            {usage.state === "full" ? <span className="text-xs text-muted-foreground">(fully used)</span> : null}
+          </span>
         </div>
       </TableCell>
       <TableCell className="px-3 py-3">
@@ -104,7 +119,8 @@ export interface PoTableProps {
 
 /**
  * The purchase orders: PO number (with its lines), vendor, total, invoiced so far (with the approving invoice
- * numbers), REMAINING and a progress bar. Scrolls inside its own frame on a narrow screen. Server-safe.
+ * numbers), REMAINING and a progress bar. Scrolls inside its own frame on a narrow screen; below 1024 px the remaining
+ * balance is repeated under the PO number, so a phone shows it without scrolling the table. Server-safe.
  */
 export function PoTable({ purchaseOrders }: PoTableProps) {
   return (

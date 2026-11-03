@@ -79,16 +79,23 @@ function RunRow({ run }: { run: RunListItem }) {
         )}
       </TableCell>
       <TableCell className="px-3 py-3">
-        <div className="flex items-center gap-2">
-          <Link
-            href={href}
-            prefetch={false}
-            title={file}
-            className="block max-w-[12rem] truncate rounded-sm py-0.5 font-medium text-foreground underline-offset-4 hover:underline"
-          >
-            {file}
-          </Link>
-          {run.is_history ? <HistoryTag /> : null}
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <Link
+              href={href}
+              prefetch={false}
+              title={file}
+              className="block max-w-[12rem] truncate rounded-sm py-0.5 font-medium text-foreground underline-offset-4 hover:underline"
+            >
+              {file}
+            </Link>
+            {run.is_history ? <HistoryTag /> : null}
+          </div>
+          {/* Below 1024 px the Decision column is off the edge of the table's scroll frame: show the decision here too (UI-1). */}
+          <div data-decision-inline="true" className="flex flex-wrap items-center gap-1.5 lg:hidden">
+            <DecisionBadge decision={run.decision} runStatus={run.status} size="sm" />
+            {run.security_flag ? <SecurityBadge size="sm" /> : null}
+          </div>
         </div>
       </TableCell>
       <TableCell className="px-3 py-3">
@@ -137,7 +144,9 @@ export interface RunsTableProps {
 
 /**
  * The dashboard table: Time, File, Vendor, Invoice #, Amount, Decision (+ shield), Top reason, Cost. It scrolls
- * inside its own frame on a narrow screen (the page never scrolls sideways). Every run text is plain React text.
+ * inside its own frame on a narrow screen (the page never scrolls sideways); below 1024 px the decision is repeated
+ * under the file name, so a phone shows what happened to each invoice without scrolling the table. Every run text
+ * is plain React text.
  */
 export function RunsTable({ runs }: RunsTableProps) {
   return (

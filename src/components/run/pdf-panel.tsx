@@ -33,9 +33,17 @@ export interface PdfPanelProps {
  * when it is a 64-character lowercase hex string (fileUrl), so no other address can reach the frame. A pre-loaded
  * history record keeps no file: it says so. On a touch screen the PDF is a button that opens it in its own tab.
  */
+/**
+ * PDF open parameters for the browser's viewer: no thumbnail pane, page fitted to the width. Chrome otherwise opens a
+ * framed PDF with its thumbnail sidebar, which leaves the invoice page about 240 px wide (routes-ui UI-4). A fragment
+ * is never sent to the server, so the request is still exactly /api/files/<hash>.
+ */
+const VIEWER_PARAMS = "#navpanes=0&view=FitH";
+
 export function PdfPanel({ run }: PdfPanelProps) {
   const touch = useSyncExternalStore(subscribe, isTouchPrimary, isTouchPrimaryOnServer);
-  const url = fileUrl(run.file_hash);
+  const file = fileUrl(run.file_hash);
+  const url = file === null ? null : `${file}${VIEWER_PARAMS}`;
   const name = displayText(run.file_name, 100);
   const embedded = url !== null && !touch;
   return (

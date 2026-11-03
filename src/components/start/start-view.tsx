@@ -18,6 +18,11 @@ interface Problem {
   message: string;
 }
 
+/** A failed sample start: shown under the card that was pressed, where the visitor is looking (routes-ui UI-2). */
+interface SampleProblem extends Problem {
+  file: string;
+}
+
 /**
  * The body of /runs/new: the upload zone, the sample cards and the reset panel.
  *
@@ -31,7 +36,7 @@ export function StartView() {
   const router = useRouter();
   const [job, setJob] = useState<Job | null>(null);
   const [uploadProblem, setUploadProblem] = useState<Problem | null>(null);
-  const [sampleProblem, setSampleProblem] = useState<Problem | null>(null);
+  const [sampleProblem, setSampleProblem] = useState<SampleProblem | null>(null);
   const runningRef = useRef(false); // set at once, so two quick presses cannot start two runs before React re-renders
   const controllerRef = useRef<AbortController | null>(null);
   const headingId = useId();
@@ -58,7 +63,7 @@ export function StartView() {
     setJob(null);
     const message = startFailureMessage(result);
     if (next.kind === "upload") setUploadProblem({ title: "Could not start the run", message });
-    else setSampleProblem({ title: "Could not start the sample", message });
+    else setSampleProblem({ title: "Could not start the sample", message, file: next.file });
   }
 
   function handleFiles(files: File[]) {
@@ -107,8 +112,7 @@ export function StartView() {
             Ten generated invoices, one for each situation the rules handle. Press a card to run it and open the live view.
           </p>
         </div>
-        {sampleProblem ? <ErrorState title={sampleProblem.title} message={sampleProblem.message} /> : null}
-        <SampleSection disabled={busy} startingFile={job?.kind === "sample" ? job.file : null} onPick={handleSample} />
+        <SampleSection disabled={busy} startingFile={job?.kind === "sample" ? job.file : null} onPick={handleSample} problem={sampleProblem} />
       </section>
 
       <ResetPanel />

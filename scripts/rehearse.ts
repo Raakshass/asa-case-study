@@ -25,7 +25,7 @@ import type { DB } from "../src/lib/db";
 import { PROMPT_VERSION } from "../src/lib/extract";
 import { mockExtractInvoice, mockSuggestPO } from "../src/lib/extract-mock";
 import { formatUsd } from "../src/lib/format";
-import { buildGroundingText, checkScreen, groundExtraction, screenPdf } from "../src/lib/guardrails";
+import { buildGroundingText, checkScreen, groundExtraction, printedBankAccounts, screenPdf } from "../src/lib/guardrails";
 import { insertInvoice, loadSnapshot, poBalance } from "../src/lib/master";
 import { normalizeInvoice } from "../src/lib/normalize";
 import { sha256, validateUpload } from "../src/lib/pdf";
@@ -187,7 +187,9 @@ async function runSample(db: DB, sample: TruthSample, opts: PassOptions): Promis
       const data = extraction.data;
       await stage(db, runId, steps, "validate", () => (isImageOnly ? null : groundExtraction(data, buildGroundingText(textItems))), (g) => checkValidate(data, g, now));
       const normalized = await stage<NormalizedInvoice>(db, runId, steps, "normalize", () => normalizeInvoice(data, snapshot.vendors), (n) => checkNormalize(n));
-      const vendor = await stage<VendorOutcome>(db, runId, steps, "vendor", () => checkVendor(data, normalized as NormalizedInvoice, snapshot), (v) => v);
+      // as the pipeline does: the accounts printed in the visible text are compared too (fix round SEC-2)
+      const printedAccounts = () => (isImageOnly ? null : printedBankAccounts(buildGroundingText(textItems), snapshot.vendors.map((v) => v.bank_account)));
+      const vendor = await stage<VendorOutcome>(db, runId, steps, "vendor", () => checkVendor(data, normalized as NormalizedInvoice, snapshot, printedAccounts()), (v) => v);
       const poMatch = await stage<PoMatchOutcome>(db, runId, steps, "po_match", () => checkPoMatch(data, normalized as NormalizedInvoice, vendor?.vendor ?? null, snapshot, mockSuggestPO), (p) => p);
       if (poMatch?.suggestion) db.prepare("UPDATE runs SET cost_usd = cost_usd + ? WHERE id = ?").run(poMatch.suggestion.costUsd, runId);
       const amounts = await stage<AmountsOutcome>(db, runId, steps, "amounts", () => checkAmounts(data, normalized as NormalizedInvoice, poMatch as PoMatchOutcome, snapshot), (a) => a);

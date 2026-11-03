@@ -23,10 +23,14 @@ import {
   type SampleListItem,
 } from "@/lib/types";
 
-/** What every helper resolves to. `status` is 0 when no HTTP response arrived (offline, timeout, aborted). */
+/**
+ * What every helper resolves to. `status` is 0 when no HTTP response arrived (offline, timeout, aborted); `timedOut`
+ * is set when it was this helper's own timeout, i.e. the server may still be working on the request (a reset that
+ * waits for queued runs keeps going on the server after the browser stops waiting: routes-ui ROUTE-1).
+ */
 export type ApiResult<T> =
   | { ok: true; data: T }
-  | { ok: false; status: number; error: string; retryAfterSec?: number };
+  | { ok: false; status: number; error: string; retryAfterSec?: number; timedOut?: true };
 
 /** The filter values of GET /api/runs?decision=. */
 export type RunsFilter = Decision | "security";
@@ -147,7 +151,7 @@ async function request<T>(url: string, spec: RequestSpec<T>): Promise<ApiResult<
     return { ok: true, data: body };
   } catch {
     // fetch rejects for network failures, aborts and timeouts; a body that cannot be read lands here too.
-    if (link.timedOut()) return fail(0, "The server took too long to respond. Try again.");
+    if (link.timedOut()) return { ok: false, status: 0, error: "The server took too long to respond. Try again.", timedOut: true };
     if (spec.signal?.aborted) return fail(0, "The request was cancelled.");
     return fail(0, "Could not reach the server. Check your connection and try again.");
   } finally {
