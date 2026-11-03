@@ -5,12 +5,14 @@ import { useId, useState } from "react";
 import { ArrowRight, History } from "lucide-react";
 import { cn } from "cn";
 import { DecisionBadge } from "@/components/shared/decision-badge";
+import { GroundedMark } from "@/components/shared/grounded-mark";
 import { ProgressBar } from "@/components/shared/progress-bar";
 import { SecurityBadge } from "@/components/shared/security-badge";
 import { EvidenceQuote, SecurityBanner } from "@/components/shared/security-banner";
 import { Button } from "@/components/ui/button";
 import type { Decision, RunDetail } from "@/lib/types";
 import { groupReasons } from "./decision-reasons";
+import { groundingOf } from "./extracted-fields";
 import {
   DETECTOR_LABEL,
   buildSecurityEvidence,
@@ -20,6 +22,7 @@ import {
   formatDate,
   formatDateTime,
   formatDuration,
+  formatMoney,
   isRecord,
   runDurationMs,
   runProgress,
@@ -29,12 +32,6 @@ import {
 const SHOWN_REASONS = 5;
 /** A reason is shown up to this many characters. */
 const REASON_CHARS = 1200;
-
-const ACCENT: Record<Decision, string> = {
-  APPROVE: "border-t-approve-solid",
-  HOLD: "border-t-hold-solid",
-  REJECT: "border-t-reject-solid",
-};
 
 const REASON_DOT: Record<Decision, string> = {
   APPROVE: "bg-approve-solid",
@@ -52,6 +49,45 @@ const CARD = "rounded-xl bg-card p-4 ring-1 ring-foreground/10 sm:p-6";
 
 /* ------------------------------------------------------------------------------------------------ pieces */
 
+/**
+ * The top of the remittance slip: who billed, which invoice, against which PO, for how much. Every value is the
+ * model's reading, shown as plain text; the tick says the value was found in the PDF's own text (the validate stage's
+ * grounding), and it only appears when it was. Identifiers are set in the mono face (0 and O cannot be confused).
+ */
+function Slip({ run }: { run: RunDetail }) {
+  const ex = run.extraction;
+  if (!ex) return null;
+  const vendor = displayText(ex.vendor_name, 100);
+  const number = displayText(ex.invoice_number, 60);
+  const po = displayText(ex.po_reference, 40);
+  const total = typeof ex.total === "number" ? formatMoney(ex.total, ex.currency) : null;
+  const grounding = groundingOf(run);
+  const grounded = (field: "invoice_number" | "po_reference" | "total") => grounding.kind === "ready" && grounding.fields.get(field) === "grounded";
+  const items: Array<{ label: string; value: string; mono: boolean; ok: boolean }> = [];
+  if (number) items.push({ label: "Invoice", value: number, mono: true, ok: grounded("invoice_number") });
+  if (po) items.push({ label: "PO", value: po, mono: true, ok: grounded("po_reference") });
+  if (total) items.push({ label: "Total", value: total, mono: false, ok: grounded("total") });
+  if (!vendor && items.length === 0) return null;
+  return (
+    <div data-slip className="min-w-0 flex-1 space-y-1.5">
+      {vendor ? <p className="text-xl font-semibold break-words [overflow-wrap:anywhere]">{vendor}</p> : null}
+      {items.length > 0 ? (
+        <dl className="flex flex-wrap gap-x-5 gap-y-1 text-sm">
+          {items.map((item) => (
+            <div key={item.label} className="flex min-w-0 items-baseline gap-1.5">
+              <dt className="text-muted-foreground">{item.label}</dt>
+              <dd className={cn("min-w-0 font-semibold break-words", item.mono ? "font-mono" : "tabular-nums")}>
+                {item.value}
+                {item.ok ? <GroundedMark status="grounded" className="ml-1 align-middle text-approve" /> : null}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+    </div>
+  );
+}
+
 /** What each check reported, quoted as it reported it: behind a button, because the same sentence usually appears in all three. */
 function RawFindings({ groups }: { groups: ReadonlyArray<{ title: string; quotes: string[] }> }) {
   const [open, setOpen] = useState(false);
@@ -68,7 +104,7 @@ function RawFindings({ groups }: { groups: ReadonlyArray<{ title: string; quotes
         <div id={id} className="space-y-3">
           {shown.map((group) => (
             <div key={group.title} className="space-y-1.5">
-              <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{group.title}</p>
+              <p className="text-sm font-semibold">{group.title}</p>
               {group.quotes.map((quote, i) => (
                 <EvidenceQuote key={i}>{quote}</EvidenceQuote>
               ))}
@@ -138,7 +174,7 @@ function Reasons({ texts, decision, title }: { texts: readonly string[]; decisio
   if (texts.length === 0) return null;
   return (
     <section className="space-y-2">
-      <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{title}</h3>
+      <h3 className="text-sm font-semibold">{title}</h3>
       <ul id={listId} className="space-y-2">
         {shown.map((text, i) => (
           <li key={i} className="flex gap-2.5">
@@ -181,10 +217,10 @@ function NextAction({ text }: { text: string }) {
   const action = displayText(text, 600);
   if (action === "") return null;
   return (
-    <section className="space-y-2">
-      <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Next action</h3>
-      <p className="flex items-start gap-2.5 rounded-lg bg-muted px-3 py-2.5 text-base font-medium">
-        <ArrowRight aria-hidden="true" className="mt-1 size-4 shrink-0 text-primary" />
+    <section className="space-y-1">
+      <h3 className="text-sm text-muted-foreground">Next action</h3>
+      <p className="flex items-start gap-2.5 text-xl leading-snug font-semibold">
+        <ArrowRight aria-hidden="true" className="mt-1.5 size-5 shrink-0 text-primary" />
         <span className="min-w-0 break-words [overflow-wrap:anywhere]">{action}</span>
       </p>
     </section>
@@ -237,13 +273,13 @@ export function DecisionCard({ run }: DecisionCardProps) {
   if (run.is_history) {
     const processed = formatDate(run.finished_at ?? run.created_at);
     return (
-      <section aria-labelledby={headingId} className={cn(CARD, "border-t-4", run.decision ? ACCENT[run.decision] : "border-t-border")}>
-        <div className="flex flex-wrap items-center gap-3">
-          <DecisionBadge decision={run.decision} runStatus={run.status} size="lg" variant="solid" />
-          <h2 id={headingId} className="flex items-center gap-2 text-lg font-semibold sm:text-xl">
+      <section aria-labelledby={headingId} className={CARD}>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <h2 id={headingId} className="flex items-center gap-2 text-xl font-semibold">
             <History aria-hidden="true" className="size-5 text-muted-foreground" />
             Processed before the demo
           </h2>
+          <DecisionBadge decision={run.decision} runStatus={run.status} size="lg" variant="solid" className="mr-1" />
         </div>
         <p className="mt-3 max-w-prose text-sm text-muted-foreground">
           {`This invoice was processed before the demo${processed ? ` (${processed})` : ""}. It counts toward purchase order balances and the duplicate check, but it has no pipeline steps and no stored PDF.`}
@@ -256,10 +292,10 @@ export function DecisionCard({ run }: DecisionCardProps) {
     const progress = runProgress(run);
     const queued = run.status === "queued" && progress.settled === 0;
     return (
-      <section aria-labelledby={headingId} aria-busy="true" className={cn(CARD, "border-t-4 border-t-primary")}>
+      <section aria-labelledby={headingId} aria-busy="true" className={CARD}>
         <div className="flex flex-wrap items-center gap-3">
           <DecisionBadge decision={null} runStatus={run.status} size="lg" />
-          <h2 id={headingId} className="text-lg font-semibold sm:text-xl">
+          <h2 id={headingId} className="text-xl font-semibold">
             {queued ? "Waiting for its turn..." : `Processing... stage ${progress.current} of ${progress.total}`}
           </h2>
         </div>
@@ -291,25 +327,29 @@ export function DecisionCard({ run }: DecisionCardProps) {
       : null;
   const listed = groups ? groups.causes : reasons.map((r) => displayText(r, REASON_CHARS)).filter((r) => r !== "");
   return (
-    <section aria-labelledby={headingId} className={cn(CARD, "border-t-4", errored || !decision ? "border-t-reject-solid" : ACCENT[decision])}>
-      <div className="flex flex-wrap items-center gap-3">
-        <DecisionBadge decision={decision} runStatus={run.status} size="lg" variant="solid" />
-        {run.security_flag ? <SecurityBadge size="lg" /> : null}
-        <h2 id={headingId} className="min-w-0 text-lg font-semibold sm:text-xl">
+    <section aria-labelledby={headingId} className={CARD}>
+      <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-4">
+        {/* The slip: who billed, which invoice, which PO, how much. "Decision" is the card's name for screen readers. */}
+        <Slip run={run} />
+        <h2 id={headingId} className={errored ? "min-w-0 flex-1 text-xl font-semibold" : "sr-only"}>
           {errored ? "This run stopped before it reached a decision" : "Decision"}
         </h2>
+        <div className="mt-1 mr-2 ml-auto flex flex-wrap items-center justify-end gap-4">
+          {run.security_flag ? <SecurityBadge size="lg" /> : null}
+          <DecisionBadge decision={decision} runStatus={run.status} size="lg" variant="solid" />
+        </div>
       </div>
 
       {findings ? <SecurityPanel findings={findings} /> : null}
 
       <div className="mt-5 space-y-5">
+        {run.next_action ? <NextAction text={run.next_action} /> : null}
         {reasons.length > 0 ? (
           <Reasons texts={listed} decision={decision} title={errored ? "What happened" : decision ? REASON_TITLE[decision] : "Reasons"} />
         ) : decision === "APPROVE" ? (
           <p className="text-base font-medium">All checks passed.</p>
         ) : null}
         {groups ? <Notes texts={groups.notes} /> : null}
-        {run.next_action ? <NextAction text={run.next_action} /> : null}
         {errored ? (
           <Button asChild variant="outline" size="lg">
             <Link href="/runs/new">Start a new run</Link>

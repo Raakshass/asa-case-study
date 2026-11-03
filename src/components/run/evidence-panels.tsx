@@ -33,7 +33,7 @@ import {
 function Block({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="min-w-0 space-y-2">
-      <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{title}</h3>
+      <h3 className="text-sm font-semibold">{title}</h3>
       {children}
     </section>
   );
@@ -428,24 +428,28 @@ interface LedgerRow {
   note?: string;
 }
 
+/**
+ * The PO balance sum, laid out as an accountant would: figures in a right-aligned column, a single rule above the
+ * subtotal ("Remaining on the PO", `strong`) and a double rule above the final figure (the row with a tone). The rules
+ * are decoration for sighted readers; the words say the same thing.
+ */
 function Ledger({ rows }: { rows: LedgerRow[] }) {
   return (
-    <dl className="overflow-hidden rounded-lg border border-border bg-card text-sm">
+    <dl className="max-w-xl text-sm">
       {rows.map((row, i) => (
         <div
           key={i}
           className={cn(
-            "flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5 px-3 py-2",
-            i > 0 && "border-t border-border",
-            row.strong && "bg-muted/60",
-            row.tone && SOFT_TONE[row.tone],
+            "flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5 py-1.5",
+            row.strong && "rule-single mt-1 pt-2",
+            row.tone && "rule-double mt-1 pt-2",
           )}
         >
-          <dt className={cn("min-w-0 flex-1 break-words [overflow-wrap:anywhere]", row.tone ? "text-foreground" : "text-muted-foreground", row.strong && "font-medium text-foreground")}>
+          <dt className={cn("min-w-0 flex-1 break-words [overflow-wrap:anywhere]", row.strong || row.tone ? "font-medium text-foreground" : "text-muted-foreground")}>
             {row.label}
-            {row.note ? <span className="block text-xs text-muted-foreground">{row.note}</span> : null}
+            {row.note ? <span className="block text-sm font-normal text-muted-foreground">{row.note}</span> : null}
           </dt>
-          <dd className={cn("shrink-0 text-right font-medium tabular-nums", row.tone && INK_TONE[row.tone])}>{row.value}</dd>
+          <dd className={cn("shrink-0 text-right font-medium tabular-nums", row.tone ? cn("text-base font-semibold", INK_TONE[row.tone]) : "text-foreground")}>{row.value}</dd>
         </div>
       ))}
     </dl>

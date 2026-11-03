@@ -56,7 +56,7 @@ export function EvidenceQuote({ children, label, className }: EvidenceQuoteProps
   return (
     <figure className={cn("min-w-0 space-y-1", className)}>
       {label ? (
-        <figcaption className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{label}</figcaption>
+        <figcaption className="text-sm font-medium text-muted-foreground">{label}</figcaption>
       ) : null}
       <blockquote className="rounded-md border border-security-border border-l-4 border-l-security-solid bg-card px-3 py-2 font-mono text-[13px] leading-relaxed break-words whitespace-pre-wrap text-foreground">
         {children}

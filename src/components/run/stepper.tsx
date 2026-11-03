@@ -5,7 +5,7 @@ import { ChevronDown } from "lucide-react";
 import { cn } from "cn";
 import { DECISION_META, DecisionBadge } from "@/components/shared/decision-badge";
 import { STEP_STATUS_LABEL, StepStatusIcon } from "@/components/shared/step-status-icon";
-import { INK_TONE, SOFT_TONE } from "@/components/shared/tones";
+import { INK_TONE } from "@/components/shared/tones";
 import { Button } from "@/components/ui/button";
 import { DECISIONS, STAGES, type Decision, type RunDetail, type StageKey, type StepView } from "@/lib/types";
 import { EvidenceBoundary, EvidencePanel } from "./evidence-panels";
@@ -26,8 +26,6 @@ function decisionOf(step: StepView, run: RunDetail): Decision | null {
 interface StepRowProps {
   step: StepView;
   run: RunDetail;
-  first: boolean;
-  last: boolean;
   open: boolean;
   onToggle: (key: StageKey) => void;
   panelId: string;
@@ -39,7 +37,7 @@ interface StepRowProps {
  * decision, how long it took and the reason; open, it shows the evidence below. The status icon always comes with
  * text: the icon's own screen-reader label, plus the same word drawn for sighted readers.
  */
-function StepRow({ step, run, first, last, open, onToggle, panelId, buttonId }: StepRowProps) {
+function StepRow({ step, run, open, onToggle, panelId, buttonId }: StepRowProps) {
   const tone = STATUS_TONE[step.status];
   const expandable = step.status !== "pending";
   // A run that stopped with an error never reached a decision, so none of its stages puts anything on hold.
@@ -50,6 +48,8 @@ function StepRow({ step, run, first, last, open, onToggle, panelId, buttonId }: 
   const decision = showsDecision ? decisionOf(step, run) : null;
   const DecisionIcon = decision ? DECISION_META[decision].Icon : null;
   const nodeTone = decision ? DECISION_META[decision].tone : tone;
+  // A passed stage is one line; a stage that needs attention shows two lines of its reason.
+  const quiet = step.status === "pass" || step.status === "skipped" || step.status === "pending";
   // The button is named by what it shows (WCAG 2.5.3: the visible words are in the name). The panel it opens is named by the title.
   const titleId = `${buttonId}-title`;
 
@@ -63,72 +63,54 @@ function StepRow({ step, run, first, last, open, onToggle, panelId, buttonId }: 
         disabled={!expandable}
         onClick={() => onToggle(step.key)}
         className={cn(
-          "flex w-full items-start gap-3 px-3 py-3 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:px-4",
+          "flex w-full items-start gap-3 px-3 py-2.5 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:px-4",
           expandable ? "cursor-pointer hover:bg-accent/40" : "cursor-default",
           step.status === "running" && "bg-accent/30",
         )}
       >
-        <span
-          className={cn(
-            "relative z-10 flex size-8 shrink-0 items-center justify-center rounded-full border transition-colors duration-300 motion-reduce:transition-none",
-            SOFT_TONE[nodeTone],
-          )}
-        >
+        <span className={cn("flex size-6 shrink-0 items-center justify-center pt-0.5", INK_TONE[nodeTone])}>
           {DecisionIcon ? <DecisionIcon aria-hidden="true" className="size-5" /> : <StepStatusIcon status={step.status} size="md" />}
         </span>
         <span className="min-w-0 flex-1 pt-0.5">
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span id={titleId} className="inline-flex items-center gap-x-2">
-              <span className="text-xs text-muted-foreground tabular-nums">{step.idx}</span>
-              <span className="text-sm font-semibold">{step.label}</span>
+              <span className="text-sm text-muted-foreground tabular-nums">{step.idx}</span>
+              <span className="text-base font-semibold">{step.label}</span>
               {decision ? <DecisionBadge decision={decision} size="sm" /> : null}
             </span>
             {decision ? null : (
-              <span aria-hidden="true" className={cn("text-xs font-medium", INK_TONE[tone])}>
+              <span aria-hidden="true" className={cn("text-sm font-medium", INK_TONE[tone])}>
                 {STEP_STATUS_LABEL[step.status]}
               </span>
             )}
             {impact ? (
-              <span
-                className={cn(
-                  "inline-flex h-5 items-center rounded-full border px-1.5 text-[11px] font-semibold tracking-wide uppercase",
-                  SOFT_TONE[impact.tone],
-                )}
-              >
+              <span className={cn("text-sm font-semibold", INK_TONE[impact.tone])}>
                 <span className="sr-only">Effect on the decision: </span>
                 {impact.label}
               </span>
             ) : null}
           </span>
           {reason ? (
-            <span className={cn("mt-1 block text-sm break-words text-muted-foreground [overflow-wrap:anywhere]", !open && "line-clamp-2")}>
+            <span className={cn("mt-0.5 block text-sm break-words text-muted-foreground [overflow-wrap:anywhere]", !open && (quiet ? "line-clamp-1" : "line-clamp-2"))}>
               {reason}
             </span>
           ) : null}
         </span>
-        <span className="flex shrink-0 items-center gap-1.5 pt-1 text-xs text-muted-foreground tabular-nums">
+        <span className="flex shrink-0 items-center gap-1.5 pt-1 text-sm text-muted-foreground tabular-nums">
           {duration ? <span>{duration}</span> : null}
           {expandable ? <ChevronDown aria-hidden="true" className={cn("size-4 transition-transform motion-reduce:transition-none", open && "rotate-180")} /> : null}
         </span>
       </button>
       {expandable && open ? (
-        <div id={panelId} role="region" aria-labelledby={titleId} className="relative z-10 px-3 pb-4 sm:pr-4 sm:pl-16">
+        <div id={panelId} role="region" aria-labelledby={titleId} className="relative z-10 px-3 pb-4 sm:pr-4 sm:pl-12">
           {/* On a phone the panel takes the full width (evidence tables need it) and covers the rail; from sm up it sits right of the rail. */}
-          <div className="rounded-lg bg-background p-3 sm:p-4">
+          <div className="border-l-2 border-border pl-3 sm:pl-4">
             <EvidenceBoundary key={`${step.status}|${step.finished_at ?? ""}`}>
               <EvidencePanel step={step} promptVersion={run.prompt_version} />
             </EvidenceBoundary>
           </div>
         </div>
       ) : null}
-      {/* The rail that joins the stage nodes: starts at the first node's centre and ends at the last one's. */}
-      <span
-        aria-hidden="true"
-        className={cn(
-          "pointer-events-none absolute left-[1.8rem] w-px bg-border sm:left-[2.05rem]",
-          first ? "top-7 bottom-0" : last ? "top-0 h-7" : "inset-y-0",
-        )}
-      />
     </li>
   );
 }
@@ -176,13 +158,11 @@ export function Stepper({ run }: StepperProps) {
         </Button>
       </div>
       <ol className="divide-y divide-border border-t border-border">
-        {rows.map((step, i) => (
+        {rows.map((step) => (
           <StepRow
             key={step.key}
             step={step}
             run={run}
-            first={i === 0}
-            last={i === rows.length - 1}
             open={open.has(step.key)}
             onToggle={toggle}
             panelId={`${uid}-${step.key}-panel`}
@@ -190,7 +170,7 @@ export function Stepper({ run }: StepperProps) {
           />
         ))}
       </ol>
-      <p className="border-t border-border px-4 py-3 text-xs text-muted-foreground sm:px-5">
+      <p className="border-t border-border px-4 py-3 text-sm text-muted-foreground sm:px-5">
         Stage times include a short pause between stages that keeps the live view easy to follow.
       </p>
     </section>

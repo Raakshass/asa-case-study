@@ -24,13 +24,13 @@ import { asStrings, displayText, formatCount, formatMoney, isRecord } from "./ru
  * waiting (not finished), ready (a verdict per field), scanned (no text layer: grounding is null) or unavailable
  * (the stage was skipped or failed, so nothing was compared).
  */
-type Grounding =
+export type Grounding =
   | { kind: "waiting" }
   | { kind: "ready"; fields: ReadonlyMap<GroundedField, FieldGrounding["status"]> }
   | { kind: "scanned" }
   | { kind: "unavailable" };
 
-function groundingOf(run: Pick<RunDetail, "status" | "steps">): Grounding {
+export function groundingOf(run: Pick<RunDetail, "status" | "steps">): Grounding {
   const validate: StepView | undefined = run.steps.find((s) => s.key === "validate");
   if (!validate || validate.status === "pending" || validate.status === "running") {
     return run.status === "done" || run.status === "error" ? { kind: "unavailable" } : { kind: "waiting" };
