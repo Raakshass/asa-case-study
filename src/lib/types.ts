@@ -874,6 +874,8 @@ export interface MasterPo {
   remaining: number;
   /** display invoice numbers of the approving invoices */
   approved_invoices: string[];
+  /** what each APPROVE invoice consumed (subtotal, else total), oldest first (review round B10) */
+  approved_breakdown: { invoice_number: string; amount: number }[];
 }
 
 /** GET /api/master -> 200 */

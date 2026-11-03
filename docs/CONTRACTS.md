@@ -678,6 +678,7 @@ export interface MasterPo {
     invoiced: number;
     remaining: number;
     approved_invoices: string[];
+    approved_breakdown: { invoice_number: string; amount: number }[]; // review round B10: what each APPROVE invoice consumed (subtotal, else total), oldest first
 }
 export interface MasterResponse {
     vendors: MasterVendor[];
@@ -868,6 +869,7 @@ export interface PoBalance {
     invoiced: number;
     remaining: number;
     approved_invoices: string[];
+    approved_breakdown: { invoice_number: string; amount: number }[]; // review round B10
 }
 export declare function loadSnapshot(db: DB): Snapshot;
 export declare function consumedAmount(inv: Pick<InvoiceRecord, "subtotal" | "total">): number;

@@ -368,6 +368,7 @@ const MasterSchema = z.strictObject({
       invoiced: z.number(),
       remaining: z.number(),
       approved_invoices: z.array(z.string()),
+      approved_breakdown: z.array(z.strictObject({ invoice_number: z.string(), amount: z.number() })),
     }),
   ),
 });

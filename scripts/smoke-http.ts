@@ -502,6 +502,11 @@ async function sectionLists(): Promise<void> {
     const remaining = (po: string) => master.purchase_orders.find((p) => p.po_number === po)?.remaining;
     eq([remaining("PO-1001"), remaining("PO-1002"), remaining("PO-1003"), remaining("PO-1006"), remaining("PO-1007")], [0, 2300, 6000, 4000, -24], "balances after #1, #2 and #7 were approved");
     eq(master.purchase_orders.find((p) => p.po_number === "PO-1003")?.approved_invoices, ["GLX-301", "GLX-302"], "PO-1003's approving invoices");
+    eq(
+      (master.purchase_orders.find((p) => p.po_number === "PO-1003") as { approved_breakdown?: unknown } | undefined)?.approved_breakdown,
+      [{ invoice_number: "GLX-301", amount: 12000 }, { invoice_number: "GLX-302", amount: 12000 }],
+      "PO-1003's approving invoices with what each consumed (review round B10)",
+    );
   });
 }
 

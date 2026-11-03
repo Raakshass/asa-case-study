@@ -212,3 +212,10 @@ Entry format:
 - Tests: `scripts/test-api.ts` +1 (the two real `beginUpload` refusals read exactly as before and are shown unchanged by the page; a rate-limit 429 and a text that merely contains the opening keep the page's sentence; 413 and 503 unchanged). The e2e checks that assert "Too many runs were started in a short time" are unchanged.
 - Why: review plan task B9 (open finding R-3).
 - Affects: a visitor who hits the upload cap now sees why (too many files at once) instead of "too many runs".
+
+## 2026-11-03 review round B10 - src/lib/master.ts, src/lib/types.ts, src/app/api/_lib/views.ts (one field added to GET /api/master)
+- Before: each purchase order in `GET /api/master` listed the invoice numbers that had consumed it (`approved_invoices`) but not how much each consumed.
+- After: `PoBalance.approved_breakdown` and `MasterPo.approved_breakdown: { invoice_number: string; amount: number }[]`: what each APPROVE invoice consumed (its subtotal, else its total, to the cent), oldest first, in the same order as `approved_invoices`; `poBalance()` computes it and `loadMaster` passes it through. An invoice with no number shows its id, as `approved_invoices` does.
+- Tests: `scripts/checks/contracts.ts` +1 (for every seeded PO the breakdown adds up to `invoiced` and names the same invoices in the same order; PO-1003 is GLX-301 12,000 and GLX-302 12,000; a held and a rejected invoice are not listed, a missing subtotal counts the total, a missing number shows the id); the strict master schema in `scripts/test-api.ts` and the PO-1003 check in `scripts/smoke-http.ts` know the field.
+- Why: review plan task B10 (the Procurement data page's split bar, task U7, needs each invoice's share).
+- Affects: a client that validates `GET /api/master` with a strict schema must accept the new key; the UI shows nothing new until U7.

@@ -209,6 +209,7 @@ export function loadMaster(db: DB): MasterResponse {
         invoiced: balance.invoiced,
         remaining: balance.remaining,
         approved_invoices: balance.approved_invoices,
+        approved_breakdown: balance.approved_breakdown,
       };
     }),
   };

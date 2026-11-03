@@ -10,9 +10,9 @@ import { PDFDocument, StandardFonts } from "pdf-lib";
 import { z } from "zod";
 import { CONFIG, ENV, paths, uploadPath } from "../../src/lib/config";
 import { INTERRUPTED_REASON, SCHEMA_SQL, ensureSeeded, openDb, recoverInterruptedRuns } from "../../src/lib/db";
-import { CONFIDENCE_TONE, addDaysIso, daysBetweenIso, formatUsd, isIsoDate, maskAccount, normId } from "../../src/lib/format";
+import { CONFIDENCE_TONE, addDaysIso, daysBetweenIso, formatUsd, isIsoDate, maskAccount, normId, round2 } from "../../src/lib/format";
 import { canonicalShape, diffShapes, lintStrictSubset, validateJsonSubset, withAnyOfNulls } from "../../src/lib/json-schema";
-import { approvedInvoiceNumbers, insertInvoice, invoicedAmount, loadSnapshot, remainingBalance } from "../../src/lib/master";
+import { approvedInvoiceNumbers, insertInvoice, invoicedAmount, loadSnapshot, poBalance, remainingBalance } from "../../src/lib/master";
 import { getTextItems, hasPdfMagic, isEncryptedPdf, isInvalidPdfError, isPasswordError, sanitizeDisplayName, sha256 } from "../../src/lib/pdf";
 import { SAMPLE_FILES, type TruthMeta, loadTruthSamples } from "../../src/lib/samples";
 import { SEED_FILES, type SeedData, SeedDataError, historyRunId, readSeedFiles, seedFromData } from "../../src/lib/seed";
@@ -308,6 +308,49 @@ export async function run(t: Check): Promise<void> {
       t.eq(po1001.lines.length, 2);
       const held = snap.invoices.find((i) => i.id === "held-1");
       t.eq([held?.po_inferred, held?.decision, held?.run_had_error], [false, "HOLD", false]);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("B10: approved_breakdown lists what each APPROVE invoice consumed, oldest first, and adds up to invoiced", () => {
+    const db = openDb(":memory:");
+    try {
+      seedFromData(db, readSeedFiles());
+      const extra = (id: string, number: string | null, date: string, subtotal: number | null, total: number, decision: "APPROVE" | "HOLD" | "REJECT") =>
+        insertInvoice(db, {
+          id, run_id: id, vendor_id: "V003", invoice_number: number, invoice_number_norm: number === null ? null : normId(number),
+          invoice_date: date, po_number: "PO-1008", po_inferred: false, subtotal, tax: null, total, currency: "USD", bank_account: null,
+          file_hash: id.padEnd(64, "0"), decision, created_at: FIXED_NOW.toISOString(),
+        });
+      extra("b10-later", "GLX-B10-B", "2026-10-26", 1000, 1100, "APPROVE");
+      extra("b10-nosubtotal", "GLX-B10-A", "2026-10-25", null, 700, "APPROVE"); // no subtotal printed: its total is what it consumes
+      extra("b10-held", "GLX-B10-H", "2026-10-24", 500, 550, "HOLD"); // consumes nothing, so it is not listed
+      extra("b10-rejected", "GLX-B10-R", "2026-10-23", 400, 440, "REJECT");
+      extra("b10-nonumber", null, "2026-10-27", 50, 55, "APPROVE"); // no number: the id is shown, as in approved_invoices
+      const snap = loadSnapshot(db);
+      const balanceOf = (poNumber: string) => {
+        const po = snap.pos.find((p) => p.po_number === poNumber);
+        if (!po) throw new Error(`seed PO ${poNumber} missing`);
+        return poBalance(po, snap.invoices);
+      };
+      for (const po of snap.pos) {
+        const b = poBalance(po, snap.invoices);
+        t.eq(round2(b.approved_breakdown.reduce((sum, x) => sum + x.amount, 0)), b.invoiced, `${po.po_number}: the breakdown adds up to invoiced`);
+        t.eq(b.approved_breakdown.map((x) => x.invoice_number), b.approved_invoices, `${po.po_number}: the same invoices in the same order`);
+      }
+      t.eq(balanceOf("PO-1003").approved_breakdown, [{ invoice_number: "GLX-301", amount: 12000 }, { invoice_number: "GLX-302", amount: 12000 }]);
+      t.eq(balanceOf("PO-1001").approved_breakdown, [{ invoice_number: "INV-0042", amount: 2900 }]);
+      t.eq(balanceOf("PO-1005").approved_breakdown, [], "a PO nothing was approved on");
+      t.eq(
+        balanceOf("PO-1008").approved_breakdown,
+        [
+          { invoice_number: "GLX-B10-A", amount: 700 },
+          { invoice_number: "GLX-B10-B", amount: 1000 },
+          { invoice_number: "b10-nonumber", amount: 50 },
+        ],
+        "oldest first; a missing subtotal counts its total; a missing number shows the id; the held and rejected ones are not listed",
+      );
     } finally {
       db.close();
     }

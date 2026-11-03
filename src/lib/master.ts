@@ -23,6 +23,8 @@ export interface PoBalance {
   invoiced: number;
   remaining: number;
   approved_invoices: string[];
+  /** what each APPROVE invoice consumed (subtotal, else total), oldest first (review round B10) */
+  approved_breakdown: { invoice_number: string; amount: number }[];
 }
 
 interface VendorRow {
@@ -131,6 +133,7 @@ export function poBalance(po: PurchaseOrder, invoices: readonly InvoiceRecord[])
     invoiced: invoicedAmount(po, invoices),
     remaining: remainingBalance(po, invoices),
     approved_invoices: approvedInvoiceNumbers(po, invoices),
+    approved_breakdown: approvedOn(po, invoices).map((i) => ({ invoice_number: i.invoice_number ?? i.id, amount: round2(consumedAmount(i)) })),
   };
 }
 
