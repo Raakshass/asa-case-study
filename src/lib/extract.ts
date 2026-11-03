@@ -18,8 +18,10 @@
 import { z } from "zod";
 import { CONFIG, ENV } from "./config";
 import { mockExtractInvoice, mockSuggestPO } from "./extract-mock";
+import { round2 } from "./format";
 import type { JsonSchemaNode } from "./json-schema";
 import {
+  EXTRACTION_LIMITS,
   INVOICE_JSON_SCHEMA,
   InvoiceExtractionSchema,
   type ExtractAttempt,
@@ -36,8 +38,12 @@ import {
   type SuggestPoResult,
 } from "./types";
 
-/** Stored on every run (runs.prompt_version). */
-export const PROMPT_VERSION = "extract-v1";
+/**
+ * Stored on every run (runs.prompt_version). v2 (2026-11-03): the schema's `tax_inclusive` description now says when it is
+ * false and when it is true; the system prompt is unchanged. The free Nemotron model had read the old one-line wording
+ * ("true if the printed amounts already include tax") as "the total includes tax" and set it on 4 of 10 samples.
+ */
+export const PROMPT_VERSION = "extract-v2";
 
 /** Plan section 5 system prompt, verbatim. */
 export const EXTRACT_SYSTEM_PROMPT = [
@@ -150,6 +156,10 @@ export const MODEL_PROFILES: Readonly<Record<string, ModelProfile>> = {
   "anthropic/claude-haiku-5.5": { nativePdf: true, effort: "low" },
   // Instruct model: no "reasoning" parameter, no native file input -> the file-parser engines.
   "qwen/qwen3-vl-235b-a22b-instruct": { nativePdf: false, temperature: 0 },
+  // Free endpoint (no credit needed; 20 requests a minute, 50 a day). It takes images and video but no PDF file part, so
+  // file-parser reads the PDF: cloudflare-ai (free) for a text PDF; a scan goes to mistral-ocr, which needs credit. It
+  // reasons at length by default (1,200 to 2,300 reasoning tokens on the two samples that finished; seven of nine timed out).
+  "nvidia/nemotron-3.5-super-vl:free": { nativePdf: false, effort: "none" },
 };
 
 function profileOf(model: string): ModelProfile | undefined {
@@ -634,7 +644,25 @@ function parseExtraction(content: string): InvoiceExtraction {
   }
   const checked = InvoiceExtractionSchema.safeParse(json);
   if (!checked.success) throw new OutputError(`Model output failed validation: ${issueSummary(checked.error)}`);
-  return checked.data;
+  return reconcileTaxInclusive(checked.data);
+}
+
+/**
+ * `tax_inclusive` is the one boolean the model has to infer rather than copy, and a model that does not think first (the free
+ * Nemotron) set it to true on 4 of 10 samples whose printed numbers settle it, so the rules held the happy path ("the subtotal
+ * (tax included) comes to ... but the total is ..."). When subtotal, tax and total are all printed and subtotal + tax equals the
+ * total (tax above the cents tolerance), the tax is plainly added on top: the flag is false whatever the model said, and `notes`
+ * says so. Only that direction: a total equal to the subtotal beside a printed tax could be a total that forgot the tax, so that
+ * stays the model's call and validate still holds any mismatch. The raw model output is stored unchanged (runs.raw_model_output).
+ */
+export function reconcileTaxInclusive(data: InvoiceExtraction): InvoiceExtraction {
+  const { subtotal, tax, total } = data;
+  if (!data.tax_inclusive || subtotal === null || tax === null || total === null) return data;
+  if (tax <= CONFIG.arithmeticTolerance) return data;
+  if (Math.abs(round2(round2(subtotal + tax) - total)) > CONFIG.arithmeticTolerance) return data; // the comparison validate makes
+  const note = "tax_inclusive corrected from true to false: the subtotal plus tax equals the total, so the tax is added on top.";
+  const notes = data.notes === "" ? note : `${data.notes} ${note}`;
+  return { ...data, tax_inclusive: false, notes: notes.length <= EXTRACTION_LIMITS.maxNotesChars ? notes : data.notes };
 }
 
 function issueSummary(error: z.ZodError): string {

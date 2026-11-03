@@ -257,7 +257,11 @@ export const INVOICE_JSON_SCHEMA: JsonSchemaNode = {
     subtotal: NULLABLE_NUMBER,
     tax: NULLABLE_NUMBER,
     total: NULLABLE_NUMBER,
-    tax_inclusive: { type: "boolean", description: "true if the printed amounts already include tax" },
+    tax_inclusive: {
+      type: "boolean",
+      description:
+        "false when the document shows tax as a separate amount added to the subtotal to reach the total (subtotal + tax = total), which is the usual case; true only if the document says the printed prices already include tax (the total then equals the subtotal)",
+    },
     bank_account: { ...NULLABLE_STRING, description: "Bank account printed on the document" },
     confidence: {
       type: "object",

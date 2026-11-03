@@ -33,6 +33,7 @@ import {
   getExtractor,
   getSuggestPo,
   hasApiKey,
+  reconcileTaxInclusive,
   suggestPO,
   type ExtractCallOptions,
   type SuggestPoOptions,
@@ -210,6 +211,7 @@ async function startFake(replies: readonly Reply[]): Promise<Fake> {
 const GEMINI = "google/gemini-3.8-flash";
 const HAIKU = "anthropic/claude-haiku-5.5";
 const QWEN = "qwen/qwen3-vl-235b-a22b-instruct";
+const NEMOTRON_FREE = "nvidia/nemotron-3.5-super-vl:free";
 const FAKE_KEY = "sk-or-v1-FAKETESTKEY0123456789abcdef0123456789abcdef";
 const ANNOTATION_MARKER = "PARSED-DOCUMENT-TEXT-THAT-MUST-NEVER-BE-STORED";
 const VALID: InvoiceExtraction = SAMPLE_INVOICE_EXTRACTION;
@@ -502,6 +504,43 @@ async function requestTests(t: Check): Promise<void> {
     });
   });
 
+  await t.test("schema: tax_inclusive says when it is false and when it is true (a model read the old one-liner as 'the total includes tax')", () => {
+    const props = (JSON.parse(JSON.stringify(INVOICE_JSON_SCHEMA)) as { properties: Record<string, { description?: string }> }).properties;
+    const d = props.tax_inclusive?.description ?? "";
+    t.ok(/false when/.test(d) && /subtotal \+ tax = total/.test(d), `the usual case (tax added to the subtotal) is named: ${d}`);
+    t.ok(/true only if/.test(d) && /equals the subtotal/.test(d), `the rare case (prices already include tax) is named: ${d}`);
+  });
+
+  await t.test("extract: tax_inclusive true is corrected to false when subtotal + tax = total, with a note; the raw output keeps what the model said", async () => {
+    await scenario([{ json: okBody({ data: { ...VALID, tax_inclusive: true } }) }], async (c) => {
+      const r = expectOk(t, await c.extract({ models: [GEMINI] }));
+      t.eq(r.data.tax_inclusive, false, "the printed 11,500 + 1,150 = 12,650 settles it");
+      t.ok(r.data.notes.includes("corrected from true to false"), r.data.notes);
+      t.eq(JSON.parse(r.rawOutput).tax_inclusive, true, "runs.raw_model_output is the model's own answer");
+      t.eq({ ...r.data, tax_inclusive: true, notes: "" }, { ...VALID, tax_inclusive: true }, "nothing else changed");
+    });
+  });
+
+  await t.test("reconcileTaxInclusive: only subtotal + tax = total beside a real tax turns true into false", () => {
+    const wrong: InvoiceExtraction = { ...VALID, tax_inclusive: true };
+    const keep = (label: string, d: InvoiceExtraction): void => t.eq(reconcileTaxInclusive(d), d, label);
+    t.eq(reconcileTaxInclusive(wrong).tax_inclusive, false, "tax added on top");
+    t.eq(reconcileTaxInclusive({ ...wrong, total: 12650.02 }).tax_inclusive, false, "2 cents of rounding still adds up (CONFIG.arithmeticTolerance)");
+    t.eq(reconcileTaxInclusive({ ...wrong, notes: "Handwritten edit on page 1." }).notes, "Handwritten edit on page 1. tax_inclusive corrected from true to false: the subtotal plus tax equals the total, so the tax is added on top.", "the model's own notes stay first");
+    const long = "x".repeat(480);
+    const capped = reconcileTaxInclusive({ ...wrong, notes: long });
+    t.eq([capped.tax_inclusive, capped.notes], [false, long], "a note that would pass the 500-character limit is dropped, the flag is still corrected");
+    keep("false stays false", VALID);
+    keep("a total equal to the subtotal beside a printed tax stays the model's call", { ...wrong, total: 11500 });
+    keep("neither reading adds up: left for validate to hold", { ...wrong, total: 13000 });
+    keep("3 cents off is a mismatch, not rounding", { ...wrong, total: 12650.03 });
+    keep("no tax printed", { ...wrong, tax: null, total: 11500 });
+    keep("a zero tax", { ...wrong, tax: 0, total: 11500 });
+    keep("no subtotal", { ...wrong, subtotal: null });
+    keep("no total", { ...wrong, total: null });
+    keep("a credit note's negative tax", { ...wrong, document_type: "credit_note", subtotal: -100, tax: -10, total: -110 });
+  });
+
   await t.test("request: Haiku gets reasoning low and the native engine, no temperature", async () => {
     await scenario([{ json: okBody({ model: HAIKU }) }], async (c) => {
       expectOk(t, await c.extract({ models: [HAIKU] }));
@@ -527,6 +566,21 @@ async function requestTests(t: Check): Promise<void> {
     });
   });
 
+  await t.test("request: the free Nemotron VL gets reasoning off, no temperature, cloudflare-ai for text and mistral-ocr for image-only", async () => {
+    await scenario([{ json: okBody({ model: NEMOTRON_FREE }) }, { json: okBody({ model: NEMOTRON_FREE }) }], async (c) => {
+      expectOk(t, await c.extract({ models: [NEMOTRON_FREE] }));
+      expectOk(t, await c.extract({ models: [NEMOTRON_FREE], isImageOnly: true }));
+      for (const i of [0, 1]) {
+        const b = bodyOf(t, c, i);
+        t.eq(b.reasoning, { effort: "none", exclude: true }, "it reasons for thousands of tokens by default and timed out on most samples; none turns that off");
+        t.ok(!("temperature" in b));
+        t.eq(b.provider, { require_parameters: true });
+      }
+      t.eq(bodyOf(t, c, 0).plugins[0], { id: "file-parser", pdf: { engine: "cloudflare-ai" } }, "a text PDF is parsed by the free engine");
+      t.eq(bodyOf(t, c, 1).plugins[0], { id: "file-parser", pdf: { engine: "mistral-ocr" } }, "a scan needs OCR, which needs credit");
+    });
+  });
+
   await t.test("request: native models read a scan natively; engineOverride wins; an unknown slug sends file-parser without an engine and no knobs", async () => {
     await scenario([{ json: okBody() }, { json: okBody({ model: HAIKU }) }, { json: okBody({ model: "acme/unknown-model" }) }, { json: okBody({ model: "acme/unknown-model" }) }], async (c) => {
       expectOk(t, await c.extract({ models: [GEMINI], isImageOnly: true }));
@@ -549,7 +603,7 @@ async function requestTests(t: Check): Promise<void> {
       t.eq(bodyOf(t, c).plugins[0], { id: "file-parser" });
       t.ok(!("reasoning" in bodyOf(t, c)));
     });
-    t.eq(Object.keys(MODEL_PROFILES).sort(), [GEMINI, "google/gemini-3.7-flash", HAIKU, QWEN].sort());
+    t.eq(Object.keys(MODEL_PROFILES).sort(), [GEMINI, "google/gemini-3.7-flash", HAIKU, QWEN, NEMOTRON_FREE].sort());
   });
 
   await t.test("request: only the bytes of a Uint8Array view are encoded", async () => {
