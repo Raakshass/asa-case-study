@@ -17,6 +17,7 @@
   "confidence": { "vendor_name": 0.9, "invoice_number": 0.9, "invoice_date": 0.9, "po_reference": 0.9, "total": 0.9 },
   "suspicious_content": [],
   "notes": "",
+  "document_signals": { "multiple_documents": false, "bank_change_notice": false, "handwritten_changes": false },
   "_meta": {
     "id": "05",
     "file": "05-scanned-no-po.pdf",

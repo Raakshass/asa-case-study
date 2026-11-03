@@ -155,6 +155,18 @@ export const ConfidenceSchema = z.object({
 });
 
 /**
+ * Yes/no signals the model reports about the document (review round B2). Typed, so the rules can act on them
+ * without reading the model's free text. All three are required in the strict schema.
+ */
+export const DocumentSignalsSchema = z.object({
+  multiple_documents: z.boolean(),
+  bank_change_notice: z.boolean(),
+  handwritten_changes: z.boolean(),
+});
+export type DocumentSignals = z.infer<typeof DocumentSignalsSchema>;
+export const NO_SIGNALS: DocumentSignals = { multiple_documents: false, bank_change_notice: false, handwritten_changes: false };
+
+/**
  * The raw shape of InvoiceExtraction, exported only to compose TruthFileSchema (samples.ts).
  * Validate model output with InvoiceExtractionSchema, never with z.object(invoiceExtractionShape).
  */
@@ -177,6 +189,7 @@ export const invoiceExtractionShape = {
     .array(z.string().max(EXTRACTION_LIMITS.maxSuspiciousItemChars))
     .max(EXTRACTION_LIMITS.maxSuspiciousItems),
   notes: z.string().max(EXTRACTION_LIMITS.maxNotesChars),
+  document_signals: DocumentSignalsSchema,
 };
 
 export const INVOICE_FIELDS = Object.keys(invoiceExtractionShape) as (keyof typeof invoiceExtractionShape)[];
@@ -284,6 +297,19 @@ export const INVOICE_JSON_SCHEMA: JsonSchemaNode = {
       type: "string",
       description: "Other oddities (bank detail change notice, handwritten edits, more than one invoice); empty if none",
     },
+    document_signals: {
+      type: "object",
+      additionalProperties: false,
+      required: ["multiple_documents", "bank_change_notice", "handwritten_changes"],
+      properties: {
+        multiple_documents: { type: "boolean", description: "true if the file holds more than one invoice or document" },
+        bank_change_notice: { type: "boolean", description: "true if the document announces new or changed bank or payment details" },
+        handwritten_changes: {
+          type: "boolean",
+          description: "true if amounts, dates or account numbers were changed by hand (handwriting, strike-outs, overwrites)",
+        },
+      },
+    },
   },
 };
 
@@ -305,6 +331,7 @@ export const SAMPLE_INVOICE_EXTRACTION: InvoiceExtraction = {
   confidence: { vendor_name: 0.98, invoice_number: 0.99, invoice_date: 0.97, po_reference: 0.97, total: 0.99 },
   suspicious_content: [],
   notes: "",
+  document_signals: { ...NO_SIGNALS },
 };
 
 /**

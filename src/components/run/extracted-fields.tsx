@@ -149,6 +149,12 @@ function buildRows(ex: InvoiceExtraction): FieldRow[] {
     { key: "bank_account", label: "Bank account", problemKey: "bank_account", value: textOrNone(ex.bank_account) },
   ];
   if (notes !== "") rows.push({ key: "notes", label: "Notes", problemKey: "notes", value: notes });
+  const flagged = [
+    ex.document_signals.multiple_documents ? "more than one document" : null,
+    ex.document_signals.bank_change_notice ? "a bank-details change notice" : null,
+    ex.document_signals.handwritten_changes ? "handwritten changes" : null,
+  ].filter((s): s is string => s !== null);
+  rows.push({ key: "document_signals", label: "Signals reported", problemKey: "document_signals", value: flagged.length === 0 ? "None reported" : flagged.join(", ") });
   rows.push({
     key: "suspicious_content",
     label: "Suspicious content",

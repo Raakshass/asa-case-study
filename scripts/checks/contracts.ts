@@ -16,10 +16,12 @@ import { approvedInvoiceNumbers, insertInvoice, invoicedAmount, loadSnapshot, re
 import { getTextItems, hasPdfMagic, isEncryptedPdf, isInvalidPdfError, isPasswordError, sanitizeDisplayName, sha256 } from "../../src/lib/pdf";
 import { SAMPLE_FILES, type TruthMeta, loadTruthSamples } from "../../src/lib/samples";
 import { SEED_FILES, type SeedData, SeedDataError, historyRunId, readSeedFiles, seedFromData } from "../../src/lib/seed";
+import { loadRunDetail } from "../../src/app/api/_lib/views";
 import {
   HISTORY_MODEL,
   INVOICE_JSON_SCHEMA,
   InvoiceExtractionSchema,
+  NO_SIGNALS,
   SAMPLE_INVOICE_EXTRACTION,
   STAGES,
   STAGE_KEYS,
@@ -147,6 +149,8 @@ export async function run(t: Check): Promise<void> {
       ["negative line amount on an invoice", { ...s, line_items: [{ ...line, amount: -5 }] }],
       ["Infinity subtotal", JSON.parse(JSON.stringify(s).replace('"subtotal":11500', '"subtotal":1e999'))],
       ["missing due_date", Object.fromEntries(Object.entries(s).filter(([k]) => k !== "due_date"))],
+      ["missing document_signals", Object.fromEntries(Object.entries(s).filter(([k]) => k !== "document_signals"))],
+      ["a document_signals flag that is not a boolean", { ...s, document_signals: { ...s.document_signals, handwritten_changes: "no" } }],
       ["unknown document_type", { ...s, document_type: "bill" }],
       ["21 suspicious items", { ...s, suspicious_content: Array.from({ length: 21 }, () => "x") }],
     ];
@@ -156,6 +160,23 @@ export async function run(t: Check): Promise<void> {
     const extra = InvoiceExtractionSchema.parse({ ...s, unexpected: "x" }) as Record<string, unknown>;
     t.ok(!("unexpected" in extra), "unknown keys are stripped");
     t.ok(InvoiceExtractionSchema.safeParse({ ...s, suspicious_content: ["q".repeat(450)] }).success, "a 450-char verbatim quote is allowed");
+  });
+
+  await t.test("B2: a run stored before document_signals existed reads as 'nothing reported'; stored signals are kept; a bad cell is still null", () => {
+    const db = openDb(":memory:");
+    try {
+      const oldRow = Object.fromEntries(Object.entries(SAMPLE_INVOICE_EXTRACTION).filter(([k]) => k !== "document_signals"));
+      t.ok(!InvoiceExtractionSchema.safeParse(oldRow).success, "a new model answer must carry the three signals");
+      const insert = db.prepare("INSERT INTO runs (id, status, extraction, created_at) VALUES (?, 'done', ?, '2026-11-03T00:00:00.000Z')");
+      insert.run("old-run", JSON.stringify(oldRow));
+      insert.run("new-run", JSON.stringify({ ...SAMPLE_INVOICE_EXTRACTION, document_signals: { ...NO_SIGNALS, handwritten_changes: true } }));
+      insert.run("bad-run", JSON.stringify({ ...oldRow, total: "not a number" }));
+      t.eq(loadRunDetail(db, "old-run")?.extraction?.document_signals, { ...NO_SIGNALS }, "an extract-v1 or extract-v2 row reads as nothing reported");
+      t.eq(loadRunDetail(db, "new-run")?.extraction?.document_signals.handwritten_changes, true);
+      t.eq(loadRunDetail(db, "bad-run")?.extraction, null, "an invalid cell is still null");
+    } finally {
+      db.close();
+    }
   });
 
   await t.test("openDb(':memory:') creates the plan section 4 schema verbatim", () => {

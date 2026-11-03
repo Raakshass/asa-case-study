@@ -259,7 +259,7 @@ const FIELD_LABELS: Readonly<Record<ConfidenceField, string>> = {
   total: "total",
 };
 
-type ValidateProblemKind = "extraction" | "document_type" | "arithmetic" | "date";
+type ValidateProblemKind = "extraction" | "document_type" | "arithmetic" | "date" | "signal";
 
 const NOT_INVOICE_LABELS: Readonly<Record<string, string>> = {
   statement: "a statement of account",
@@ -305,7 +305,8 @@ export function checkValidate(extraction: InvoiceExtraction, grounding: Groundin
   /**
    * What kind of problem each one is, for nextAction(): "extraction" (missing, unreadable, low-confidence or
    * ungrounded values: re-keying helps), "document_type", "arithmetic" (the document's own numbers disagree)
-   * and "date" (a readable date outside the allowed range). Only "extraction" means manual data entry.
+   * "date" (a readable date outside the allowed range) and "signal" (the model reported more than one document or
+   * handwritten changes; review round B2). Only "extraction" means manual data entry.
    */
   const kinds = new Set<ValidateProblemKind>();
   const problem = (field: string, text: string, kind: ValidateProblemKind) => {
@@ -321,6 +322,15 @@ export function checkValidate(extraction: InvoiceExtraction, grounding: Groundin
     problem("document_type", "This document is a credit note, not an invoice; route to credit process", "document_type");
   } else if (type !== "invoice") {
     problem("document_type", `This document is not an invoice (it is ${NOT_INVOICE_LABELS[type] ?? "an unrecognised kind of document"})`, "document_type");
+  }
+
+  // Signals the model reported (review round B2): typed booleans, never its free text.
+  const signals = extraction.document_signals;
+  if (signals?.multiple_documents === true) {
+    problem("document_signals", "The file appears to hold more than one document; split it and upload each invoice on its own", "signal");
+  }
+  if (signals?.handwritten_changes === true) {
+    problem("document_signals", "The document has handwritten changes to amounts, dates or account numbers; confirm them with the vendor", "signal");
   }
 
   // Required fields
@@ -559,11 +569,14 @@ export function checkVendor(
   const seen = [...new Set((Array.isArray(printedAccounts) ? printedAccounts : []).map((a) => (typeof a === "string" ? normId(a) : "")).filter((a) => a !== ""))].slice(0, 10);
   const strangers = seen.filter((a) => a !== bankOnFile);
   const bankMismatch = (printedBank !== null && printedBank !== bankOnFile) || strangers.length > 0;
+  // The model reported a notice of new or changed bank details (review round B2): verify by phone even when no different account is printed.
+  const bankNotice = extraction.document_signals?.bank_change_notice === true;
   const detail = {
     vendor_id: vendor.id,
     vendor_name: vendor.name,
     approved: vendor.approved,
     bank_mismatch: bankMismatch,
+    bank_change_notice: bankNotice,
     invoice_bank: maskAccount(printedBank === null ? null : (extraction.bank_account ?? printedBank)),
     master_bank: maskAccount(vendor.bank_account),
     phone_on_file: vendor.phone_on_file,
@@ -587,6 +600,14 @@ export function checkVendor(
       phone === null
         ? `${differ}; no phone number is on file, so get a verified number from procurement before contacting the vendor. Do not use contact details from the invoice.`
         : `${differ}; call ${phone} (number on file) to verify. Do not use contact details from the invoice.`;
+    return { status: "fail", severity: "hold", reason, detail, vendor, bankMismatch };
+  }
+  if (bankNotice) {
+    const phone = blank(vendor.phone_on_file) ? null : (vendor.phone_on_file as string).trim();
+    const reason =
+      phone === null
+        ? "The document announces new or changed bank details; no phone number is on file, so get a verified number from procurement before contacting the vendor. Do not use contact details from the invoice."
+        : `The document announces new or changed bank details; call ${phone} (number on file) to verify. Do not use contact details from the invoice.`;
     return { status: "fail", severity: "hold", reason, detail, vendor, bankMismatch };
   }
   const bankNote = printedBank === null && seen.length === 0 ? "; the invoice prints no bank account" : " and the bank account matches the vendor master";
@@ -1446,6 +1467,8 @@ function queueForPayment(ctx: DecisionContext): string {
  * price above the PO's (DEC-5) get their own amounts advice. A price above the PO's names "the extra units" only when a
  * PO line is billed for more units than it orders (detail.line_totals[].quantity_over), not for a higher price on the
  * ordered quantity (DEC-1-R1).
+ * Review round B2: a bank-change notice the model reported counts as a bank problem (same advice), and its
+ * multiple-documents and handwritten-changes flags get their own advice right after the bank row.
  */
 export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionContext): string {
   if (isSecurityFlagged(steps, ctx)) {
@@ -1469,7 +1492,8 @@ export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionCont
 
   const vendorStep = steps.vendor;
   const vendorFailed = vendorStep?.status === "fail";
-  const bankProblem = vendorFailed && vendorStep.severity !== "reject" && ctx.vendor?.bankMismatch === true;
+  const bankNoticed = (vendorStep?.detail as { bank_change_notice?: unknown } | undefined)?.bank_change_notice === true;
+  const bankProblem = vendorFailed && vendorStep.severity !== "reject" && (ctx.vendor?.bankMismatch === true || bankNoticed);
   // vendor not found / not approved
   if (vendorFailed && vendorStep.severity === "reject") return "Route vendor to onboarding before this can be processed.";
   // bank
@@ -1478,6 +1502,15 @@ export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionCont
     return blank(phone)
       ? "Verify the new bank details with the vendor, using a number from procurement records (none is on file), before any payment."
       : `Call the vendor on ${(phone as string).trim()} to verify new bank details before any payment.`;
+  }
+  // Signals the model reported (review round B2)
+  const reported = ctx.extraction?.document_signals;
+  if (reported?.multiple_documents === true) return "Split the file so each invoice is uploaded on its own, then run each one.";
+  if (reported?.handwritten_changes === true) {
+    const phone = ctx.vendor?.vendor?.phone_on_file;
+    return blank(phone)
+      ? "Confirm the handwritten changes with the vendor, using a number from procurement records, before any payment."
+      : `Call the vendor on ${(phone as string).trim()} (number on file) to confirm the handwritten changes before any payment.`;
   }
   // extraction failed / low confidence (also an unreadable or ambiguous vendor name). A validate failure counts only
   // when one of its problems is about reading the document: a future date or the vendor's own arithmetic is not

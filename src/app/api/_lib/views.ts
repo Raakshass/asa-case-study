@@ -9,6 +9,7 @@ import { loadSnapshot, poBalance } from "@/lib/master";
 import {
   HISTORY_MODEL,
   InvoiceExtractionSchema,
+  NO_SIGNALS,
   type DashboardKpis,
   type Decision,
   type InvoiceExtraction,
@@ -43,7 +44,11 @@ function parseReasons(text: string | null): string[] {
 
 /** The stored extraction, re-validated: a cell that is not a valid extraction is null, so the UI never gets a wrong shape. */
 function parseExtraction(text: string | null): InvoiceExtraction | null {
-  const parsed = InvoiceExtractionSchema.safeParse(parseJson(text));
+  const raw = parseJson(text);
+  const obj = plainObject(raw);
+  // Rows stored before review round B2 (extract-v1, extract-v2) have no document_signals: read them as "nothing reported".
+  const value = obj !== null && !("document_signals" in obj) ? { ...obj, document_signals: NO_SIGNALS } : raw;
+  const parsed = InvoiceExtractionSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
 }
 

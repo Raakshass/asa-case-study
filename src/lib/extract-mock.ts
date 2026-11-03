@@ -15,6 +15,7 @@ import { loadTruthSamples, type TruthMeta, type TruthSample } from "./samples";
 import {
   CONFIDENCE_FIELDS,
   MOCK_MODEL,
+  NO_SIGNALS,
   type ExtractAttempt,
   type ExtractOptions,
   type ExtractResult,
@@ -105,6 +106,7 @@ function unknownDocument(): InvoiceExtraction {
     confidence: { vendor_name: 0.1, invoice_number: 0.1, invoice_date: 0.1, po_reference: 0.1, total: 0.1 },
     suspicious_content: [],
     notes: "Mock extractor: this file is not one of the generated samples, so nothing was extracted.",
+    document_signals: { ...NO_SIGNALS },
   };
 }
 

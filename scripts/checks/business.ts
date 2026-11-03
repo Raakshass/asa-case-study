@@ -54,6 +54,7 @@ import {
 import { type TruthSample, loadTruthSamples } from "../../src/lib/samples";
 import {
   GROUNDED_FIELDS,
+  NO_SIGNALS,
   SAMPLE_INVOICE_EXTRACTION,
   STAGE_KEYS,
   type AmountsOutcome,
@@ -164,6 +165,7 @@ const NULLS: InvoiceExtraction = {
   confidence: { vendor_name: 0, invoice_number: 0, invoice_date: 0, po_reference: 0, total: 0 },
   suspicious_content: [],
   notes: "",
+  document_signals: { ...NO_SIGNALS },
 };
 
 function row(over: Partial<SnapshotInvoice> = {}): SnapshotInvoice {
@@ -802,6 +804,22 @@ export async function run(t: Check): Promise<void> {
     }
   });
 
+  await t.test("B2: multiple documents / handwritten changes -> validate holds with kind 'signal', not manual entry", () => {
+    for (const [flag, phrase] of [
+      ["multiple_documents", "more than one document"],
+      ["handwritten_changes", "handwritten changes"],
+    ] as const) {
+      const r = checkValidate(ex({ document_signals: { ...NO_SIGNALS, [flag]: true } }), allGrounded(ex()), FIXED_NOW);
+      t.eq([r.status, r.severity], ["fail", "hold"], flag);
+      t.includes(r.reason, phrase);
+      t.eq(r.detail?.problem_kinds, ["signal"], flag);
+    }
+  });
+
+  await t.test("B2: every signal false -> sample 1 still approves", () => {
+    t.eq(checkValidate(ex(), allGrounded(ex()), FIXED_NOW).status, "pass");
+  });
+
   /* ---------------------------------------------------------------------------- checkNormalize */
 
   await t.test("checkNormalize: always passes, summarises number, date and vendor, detail is the NormalizedInvoice", () => {
@@ -884,6 +902,42 @@ export async function run(t: Check): Promise<void> {
     t.includes(r2.reason, "Bank details differ from vendor master");
     t.includes(r2.reason, "no phone number is on file");
     t.includes(r2.reason, "Do not use contact details from the invoice");
+  });
+
+  await t.test("B2: a bank-change notice with the account on file -> hold, call the number on file", () => {
+    const r = vendorCheck(seededSnapshot(), ex({ document_signals: { ...NO_SIGNALS, bank_change_notice: true } }));
+    t.eq([r.status, r.severity, r.bankMismatch], ["fail", "hold", false]);
+    t.eq(r.reason, "The document announces new or changed bank details; call +1 415 555 0102 (number on file) to verify. Do not use contact details from the invoice.");
+    t.eq(r.detail?.bank_change_notice, true);
+  });
+
+  await t.test("B2: a notice AND a different account -> the existing mismatch reason, unchanged", () => {
+    const r = vendorCheck(seededSnapshot(), ex({ bank_account: "ACC-00-9911", document_signals: { ...NO_SIGNALS, bank_change_notice: true } }));
+    t.eq(r.reason, "Bank details differ from vendor master; call +1 415 555 0102 (number on file) to verify. Do not use contact details from the invoice.");
+  });
+
+  await t.test("B2: a notice with no phone on file -> hold, get a verified number from procurement", () => {
+    const snap = seededSnapshot();
+    vendorOf(snap, "V002").phone_on_file = null;
+    const r = vendorCheck(snap, ex({ document_signals: { ...NO_SIGNALS, bank_change_notice: true } }));
+    t.eq([r.status, r.severity], ["fail", "hold"]);
+    t.includes(r.reason, "no phone number is on file");
+    t.includes(r.reason, "Do not use contact details from the invoice");
+  });
+
+  await t.test("B2 (pipeline): each signal ends HOLD with its own next action", async () => {
+    const snap = seededSnapshot();
+    const multi = await runStages(snap, ex({ document_signals: { ...NO_SIGNALS, multiple_documents: true } }));
+    t.eq(multi.result.decision, "HOLD", "multiple documents");
+    t.eq(multi.action, "Split the file so each invoice is uploaded on its own, then run each one.");
+    const hand = await runStages(snap, ex({ document_signals: { ...NO_SIGNALS, handwritten_changes: true } }));
+    t.eq(hand.result.decision, "HOLD", "handwritten changes");
+    t.eq(hand.action, "Call the vendor on +1 415 555 0102 (number on file) to confirm the handwritten changes before any payment.");
+    const notice = await runStages(snap, ex({ document_signals: { ...NO_SIGNALS, bank_change_notice: true } }));
+    t.eq(notice.result.decision, "HOLD", "bank-change notice");
+    t.eq(notice.action, "Call the vendor on +1 415 555 0102 to verify new bank details before any payment.");
+    const clean = await runStages(snap, ex());
+    t.eq(clean.result.decision, "APPROVE", "no signal: the happy path still approves");
   });
 
   await t.test("checkVendor: no readable vendor name or an ambiguous name is a hold (not a reject): nobody knows the vendor is unknown", () => {
