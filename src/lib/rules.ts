@@ -15,7 +15,7 @@
 import { CONFIG } from "./config";
 import { addDaysIso, daysBetweenIso, formatPct, formatUsd, isIsoDate, maskAccount, normId, round2, toIsoDate } from "./format";
 import { type Snapshot, poBalance, remainingBalance } from "./master";
-import { findVendorMatches, normalizeDate, normalizeInvoiceNumber } from "./normalize";
+import { closeVendorMatches, findVendorMatches, normalizeDate, normalizeInvoiceNumber } from "./normalize";
 import {
   CONFIDENCE_FIELDS,
   STAGE_KEYS,
@@ -549,6 +549,19 @@ export function checkVendor(
         severity: "info",
         reason: `Vendor "${clip(printedName, 80)}" is not in the vendor master; it is not routed to onboarding because this document is not an invoice.`,
         detail: { vendor_id: null, bank_mismatch: false },
+        vendor: null,
+        bankMismatch: false,
+      };
+    }
+    // A near miss of a vendor on file is a misread until a person says otherwise (review round B3): hold, never reject.
+    const close = closeVendorMatches(printedName, snapshot.vendors);
+    if (close.length > 0) {
+      const named = close.map((v) => `${v.name} (${v.id})`).join(", ");
+      return {
+        status: "fail",
+        severity: "hold",
+        reason: `Vendor "${clip(printedName, 80)}" is not in the vendor master; the closest ${close.length === 1 ? "match is" : "matches are"} ${named}. Confirm the vendor before this invoice is processed.`,
+        detail: { vendor_id: null, close_vendor_ids: close.map((v) => v.id), bank_mismatch: false },
         vendor: null,
         bankMismatch: false,
       };
@@ -1520,6 +1533,11 @@ export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionCont
   if (steps.extract?.status === "error" && (steps.extract.detail as { failure_kind?: unknown } | undefined)?.failure_kind === "billing_auth") {
     // nothing was read because the AI reading service was unavailable: a re-run works once it is back (DRILL-2)
     return "Re-run this invoice once the AI reading service is available again, or enter it manually.";
+  }
+  // A near-miss vendor name (review round B3): the vendor is probably on file, so say which one to check, not "re-key".
+  const closeIds = (vendorStep?.detail as { close_vendor_ids?: unknown } | undefined)?.close_vendor_ids;
+  if (vendorFailed && Array.isArray(closeIds) && closeIds.length > 0) {
+    return "Confirm which vendor issued this invoice against the vendor master, then re-key the vendor name.";
   }
   if (
     steps.extract?.status === "error" ||

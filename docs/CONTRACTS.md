@@ -967,6 +967,8 @@ export declare function normalizeInvoiceNumber(value: string | null): string | n
 export declare function normalizeDate(value: string | null): string | null;
 export declare function normalizeVendorName(value: string | null): string | null;
 export declare function findVendorMatches(name: string | null, vendors: readonly Vendor[]): Vendor[]; // added at the Phase 1-4 integration
+export declare function editDistance(a: string, b: string): number; // added in review round B3 (optimal string alignment)
+export declare function closeVendorMatches(name: string | null, vendors: readonly Vendor[]): Vendor[]; // added in review round B3: near misses of a vendor on file, never an exact match
 export declare function resolveVendor(name: string | null, vendors: readonly Vendor[]): Vendor | null;
 export declare function normalizePoReference(value: string | null): string | null;
 export declare function normalizeCurrency(value: string | null): string | null;

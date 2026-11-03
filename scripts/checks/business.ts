@@ -30,6 +30,8 @@ import { printedBankAccounts } from "../../src/lib/guardrails";
 import { type Snapshot, insertInvoice, loadSnapshot, remainingBalance } from "../../src/lib/master";
 import {
   VENDOR_SUFFIXES,
+  closeVendorMatches,
+  editDistance,
   findVendorMatches,
   normalizeCurrency,
   normalizeDate,
@@ -852,6 +854,54 @@ export async function run(t: Check): Promise<void> {
     t.eq([r.status, r.severity, r.vendor, r.bankMismatch], ["fail", "reject", null, false]);
     t.includes(r.reason, "onboarding");
     t.includes(r.reason, "Contoso Ltd");
+  });
+
+  await t.test("B3: a near-miss vendor name -> hold naming the closest vendor, never reject", () => {
+    for (const [printed, id] of [
+      ["Glovex Logistics Ltd", "V003"],
+      ["lnitech Facilities Co.", "V004"],
+      ["Northwind IT Solutons LLC", "V002"],
+    ] as const) {
+      const r = vendorCheck(seededSnapshot(), ex({ vendor_name: printed }));
+      t.eq([r.status, r.severity], ["fail", "hold"], printed);
+      t.includes(r.reason, `(${id})`);
+      t.eq(r.vendor, null, "the vendor is never resolved from a near miss");
+      t.eq(r.detail?.close_vendor_ids, [id], printed);
+    }
+  });
+
+  await t.test("B3: names that are not near misses still reject for onboarding", () => {
+    for (const printed of ["Contoso Ltd", "Harbor Lane Catering Co.", "Umbrella Consultancy Group"]) {
+      t.eq(vendorCheck(seededSnapshot(), ex({ vendor_name: printed })).severity, "reject", printed);
+    }
+  });
+
+  await t.test("B3: editDistance basics", () => {
+    t.eq(editDistance("globex", "glovex"), 1);
+    t.eq(editDistance("initech", "iintech"), 1, "a swap counts as one");
+    t.eq(editDistance("acme", "acme"), 0);
+    t.eq(editDistance("", "abc"), 3);
+  });
+
+  await t.test("B3: closeVendorMatches limits (6+ characters, 1 edit under 12, 2 from 12, exact matches left to resolveVendor)", () => {
+    const vendors = seededSnapshot().vendors;
+    const ids = (name: string | null) => closeVendorMatches(name, vendors).map((v) => v.id);
+    t.eq(ids("Glubex"), ["V003"], "6 characters, 1 edit from the alias Globex");
+    t.eq(ids("Glbx"), [], "shorter than 6 characters is never compared");
+    t.eq(ids("Gloubex"), ["V003"], "7 characters, 1 edit");
+    t.eq(ids("Glouvex"), [], "7 characters, 2 edits: too far for a short name");
+    t.eq(ids("Glovex Logistcs Ltd"), ["V003"], "a long name may be 2 edits away (a letter misread and one dropped)");
+    t.eq(ids("Globex Logistics Ltd"), [], "an exact match is resolveVendor's job, not a near miss");
+    t.eq(ids(null), [], "no name");
+    t.eq(ids("x".repeat(81)), [], "an over-long name is not compared");
+  });
+
+  await t.test("B3 (pipeline): a misread vendor ends HOLD, PO match and duplicate check are skipped, the advice names the master", async () => {
+    const st = await runStages(seededSnapshot(), ex({ vendor_name: "Glovex Logistics Ltd" }));
+    t.eq(st.result.decision, "HOLD");
+    t.eq([st.steps.vendor?.status, st.steps.vendor?.severity], ["fail", "hold"]);
+    t.eq([st.steps.po_match?.status, st.steps.duplicate?.status], ["skipped", "skipped"]);
+    t.eq(st.action, "Confirm which vendor issued this invoice against the vendor master, then re-key the vendor name.");
   });
 
   await t.test("checkVendor: a vendor that is not approved -> reject, route to onboarding (the vendor is still returned)", () => {

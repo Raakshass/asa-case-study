@@ -280,3 +280,51 @@ export function normalizeInvoice(extraction: InvoiceExtraction, vendors: readonl
     bank_account_norm: bankNorm === "" ? null : bankNorm,
   };
 }
+
+/* ================================================================================================
+ * Near-miss vendor names (review round B3)
+ * ============================================================================================== */
+
+/**
+ * Optimal-string-alignment distance: insertions, deletions, substitutions and swaps of two neighbouring characters
+ * (review round B3). Inputs are capped at 80 characters by the caller, so the table stays small.
+ */
+export function editDistance(a: string, b: string): number {
+  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let v = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) v = Math.min(v, d[i - 2][j - 2] + 1);
+      d[i][j] = v;
+    }
+  }
+  return d[a.length][b.length];
+}
+
+/**
+ * Vendors whose normalized name or alias is a near miss of `name`: a misread letter or two, not another company
+ * (review round B3). Names shorter than 6 characters are never compared (too many near misses). At most 1 edit for
+ * names under 12 characters, 2 from 12. Only ever used to HOLD instead of REJECT; it never resolves a vendor.
+ * An exact normalized match is not a near miss: resolveVendor owns it (and an ambiguous one is held earlier), so it is
+ * skipped here (a deviation from the plan's code; without it, an id that is not in the master next to a name that is
+ * would turn the pre-existing "an id that is not in the master is not a vendor" test from REJECT into HOLD).
+ */
+export function closeVendorMatches(name: string | null, vendors: readonly Vendor[]): Vendor[] {
+  const key = normalizeVendorName(name);
+  if (key === null || key.length < 6 || key.length > 80) return [];
+  const allowed = key.length >= 12 ? 2 : 1;
+  const found: Vendor[] = [];
+  for (const vendor of vendors) {
+    for (const candidate of [vendor.name, ...vendor.aliases]) {
+      const other = normalizeVendorName(candidate);
+      if (other === null || other.length < 6 || other.length > 80 || Math.abs(other.length - key.length) > allowed) continue;
+      if (other === key) continue;
+      if (editDistance(key, other) <= allowed) {
+        found.push(vendor);
+        break;
+      }
+    }
+  }
+  return found;
+}
