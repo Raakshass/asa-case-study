@@ -11,6 +11,7 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { defaultAutomationDeps, dispatchRunFinished } from "./automations/engine";
 import { CONFIG, paths, uploadPath } from "./config";
 import { type DB, INTERRUPTED_NEXT_ACTION, getDb } from "./db";
 import { PROMPT_VERSION, getExtractor, getSuggestPo } from "./extract";
@@ -61,6 +62,11 @@ export interface PipelineDeps {
   pacingMs: number;
   /** where uploads/<sha256>.pdf live */
   uploadsDir: string;
+  /**
+   * Called once after a run settles (done or error); automations dispatch from here. Must not throw or block.
+   * Optional: a caller that injects its own database gets none unless it passes one (so the pipeline's own tests are unchanged).
+   */
+  onFinished?: (runId: string) => void;
 }
 
 /** Production wiring: getDb(), getExtractor(), getSuggestPo(), the real clock, CONFIG pacing, DATA_DIR/uploads. */
@@ -72,6 +78,7 @@ export function defaultPipelineDeps(): PipelineDeps {
     now: () => new Date(),
     pacingMs: CONFIG.stagePacingMs,
     uploadsDir: paths.uploadsDir,
+    onFinished: (id) => dispatchRunFinished(defaultAutomationDeps(), id),
   };
 }
 
@@ -88,6 +95,8 @@ function resolveDeps(partial: Partial<PipelineDeps> | undefined): PipelineDeps {
     now: p.now ?? (() => new Date()),
     pacingMs: p.pacingMs ?? CONFIG.stagePacingMs,
     uploadsDir: p.uploadsDir ?? paths.uploadsDir,
+    // A caller that injects a database is a test: it gets no automations unless it passes onFinished itself.
+    onFinished: p.onFinished ?? (p.db === undefined ? (id) => dispatchRunFinished(defaultAutomationDeps(), id) : undefined),
   };
 }
 
@@ -359,6 +368,13 @@ export async function runPipeline(runId: string, deps?: Partial<PipelineDeps>): 
   }
   const done = readRun(db, runId);
   if (done === undefined) throw new Error("Run not found");
+  if (done.status === "done" || done.status === "error") {
+    try {
+      d.onFinished?.(runId);
+    } catch {
+      // automations never affect a run (D3); dispatch logs its own failures
+    }
+  }
   return done;
 }
 

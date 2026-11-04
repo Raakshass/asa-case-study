@@ -24,11 +24,14 @@
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import { deflateSync } from "node:zlib";
 import { PDFDocument, PDFName } from "pdf-lib";
 import { z } from "zod";
+import { automationsIdle, dispatchRunFinished, type AutomationDeps } from "../src/lib/automations/engine";
+import { assignmentForRun, executionsForRun, getExecution, listWorkflows, notesForRun } from "../src/lib/automations/store";
 import { CONFIG, paths, uploadPath } from "../src/lib/config";
 import { type DB, INTERRUPTED_NEXT_ACTION, INTERRUPTED_REASON, getDb, openDb } from "../src/lib/db";
 import { normId } from "../src/lib/format";
@@ -75,6 +78,16 @@ globalThis.fetch = (() => {
   blockedFetches++;
   return Promise.reject(new TypeError("blocked: test-api never uses the network"));
 }) as typeof fetch;
+
+// Automations never reach the network in this script either: no allowed hosts, no scheduler, and https.request (which the
+// sender uses, and which the fetch guard above does not cover) counts its calls and refuses to run.
+delete process.env.AUTOMATION_ALLOWED_HOSTS;
+process.env.AUTOMATION_SCHEDULER = "off";
+let blockedHttps = 0;
+(https as { request: unknown }).request = () => {
+  blockedHttps++;
+  throw new Error("blocked: test-api never uses the network");
+};
 
 /** JSON log lines of the app (pipeline stages, server errors, startup) are captured; everything else prints. */
 const captured: string[] = [];
@@ -2678,6 +2691,145 @@ async function reviewGroup(t: Check): Promise<void> {
   });
 }
 
+/* ================================================================================================
+ * Group: automations (A6 onward: the pipeline hook, the invariant, and later the routes)
+ * ============================================================================================== */
+
+const autoDeps = (db: DB, send: AutomationDeps["send"], over: Partial<AutomationDeps> = {}): AutomationDeps => ({
+  db,
+  now: () => FIXED_NOW,
+  send,
+  allowedHosts: ["hooks.example.com"],
+  baseUrl: null,
+  sleep: () => Promise.resolve(),
+  reviewTrigger: true,
+  ...over,
+});
+const recordingSender = () => {
+  const sent: { url: string; text: string }[] = [];
+  const send: AutomationDeps["send"] = (req) => {
+    sent.push({ url: req.url, text: (JSON.parse(req.body) as { text?: string }).text ?? "" });
+    return Promise.resolve({ ok: true, status: 200, bodyText: "ok", error: null, retryable: false });
+  };
+  return { sent, send };
+};
+const setSeedUrl = (db: DB, seedKey: string, nodeId: string, url: string): void => {
+  db.prepare("UPDATE workflows SET secrets = ? WHERE seed_key = ?").run(JSON.stringify({ [nodeId]: { url } }), seedKey);
+};
+
+async function automationsGroup(t: Check): Promise<void> {
+  await t.test("A6: the pipeline calls onFinished once per finished run; samples 3 and 9 are routed by the first seed (store level)", async () => {
+    const rig = makeRig();
+    const sender = recordingSender();
+    const deps = autoDeps(rig.db, sender.send);
+    const finished: string[] = [];
+    const ids = new Map<string, string>();
+    for (const file of ["03-split-po-overbill.pdf", "09-prompt-injection.pdf", "01-happy-northwind.pdf"] as const) {
+      const id = rig.run(sampleBytes(file), file);
+      ids.set(file, id);
+      await enqueue(id, rig.deps({ onFinished: (rid) => (finished.push(rid), dispatchRunFinished(deps, rid)) }));
+    }
+    await automationsIdle();
+    t.eq(finished, [...ids.values()], "once per run, in order");
+    const three = ids.get("03-split-po-overbill.pdf") as string;
+    const nine = ids.get("09-prompt-injection.pdf") as string;
+    const one = ids.get("01-happy-northwind.pdf") as string;
+    t.eq([executionsForRun(rig.db, three).map((e) => e.status), assignmentForRun(rig.db, three)?.assignee, notesForRun(rig.db, three).length], [["success"], "AP lead", 0], "sample 3: over 5,000, not flagged");
+    t.eq([executionsForRun(rig.db, nine).map((e) => e.status), assignmentForRun(rig.db, nine)?.assignee], [["success"], "Finance security"], "sample 9: flagged");
+    t.ok(notesForRun(rig.db, nine)[0].text.startsWith("Security review needed before any payment:"), "and a note");
+    t.eq(executionsForRun(rig.db, one).length, 0, "sample 1 was approved: nothing starts");
+    t.eq(sender.sent.length, 0, "no rejection, no chat message");
+  });
+
+  await t.test("A6: dispatching a run again by hand starts nothing new (the unique trigger key)", async () => {
+    const rig = makeRig();
+    const deps = autoDeps(rig.db, recordingSender().send);
+    const id = rig.run(sampleBytes("05-scanned-no-po.pdf"), "05.pdf");
+    await enqueue(id, rig.deps({ onFinished: (rid) => dispatchRunFinished(deps, rid) }));
+    dispatchRunFinished(deps, id);
+    dispatchRunFinished(deps, id);
+    await automationsIdle();
+    t.eq(executionsForRun(rig.db, id).length, 1);
+    t.eq(assignmentForRun(rig.db, id)?.assignee, "AP clerk");
+  });
+
+  await t.test("A6: a pipeline that is given its own database starts no automations unless it passes onFinished (the pipeline tests keep their behaviour)", async () => {
+    const rig = makeRig();
+    const id = rig.run(sampleBytes("03-split-po-overbill.pdf"), "03.pdf");
+    await enqueue(id, rig.deps());
+    await automationsIdle();
+    t.eq([executionsForRun(rig.db, id).length, assignmentForRun(rig.db, id)], [0, null]);
+    t.eq(rig.db.prepare("SELECT COUNT(*) FROM workflow_executions").pluck().get(), 0);
+  });
+
+  await t.test("A6: a failing onFinished never changes the run or stops the next one", async () => {
+    const rig = makeRig();
+    const a = rig.run(sampleBytes("01-happy-northwind.pdf"), "01.pdf");
+    const b = rig.run(sampleBytes("02-within-tolerance.pdf"), "02.pdf");
+    await enqueue(a, rig.deps({ onFinished: () => { throw new Error("boom"); } }));
+    await enqueue(b, rig.deps());
+    t.eq([runRow(rig.db, a).status, runRow(rig.db, a).decision, runRow(rig.db, b).decision], ["done", "APPROVE", "APPROVE"]);
+  });
+
+  await t.test("automations invariant (D3): all ten samples decide exactly the same, and leave the same invoices and PO balances, with every automation on as without", async () => {
+    const snapshotOf = async (withAutomations: boolean) => {
+      const rig = makeRig();
+      const sender = recordingSender();
+      const deps = autoDeps(rig.db, sender.send);
+      if (withAutomations) {
+        rig.db.prepare("UPDATE workflows SET enabled = 1, enabled_at = ?").run(FIXED_NOW.toISOString());
+        setSeedUrl(rig.db, "chat-rejections", "chat", "https://hooks.example.com/T000/B000/rej1");
+        setSeedUrl(rig.db, "daily-holds", "chat", "https://hooks.example.com/T000/B000/day1");
+      }
+      for (const file of SAMPLE_FILES) {
+        const id = rig.run(sampleBytes(file), file);
+        await enqueue(id, rig.deps(withAutomations ? { onFinished: (rid) => dispatchRunFinished(deps, rid) } : {}));
+      }
+      await automationsIdle();
+      const runs = rig.db.prepare("SELECT file_name, status, decision, decision_reasons, next_action, security_flag FROM runs WHERE model IS NOT 'history' ORDER BY file_name").all();
+      const invoices = (rig.db.prepare("SELECT r.file_name AS file_name, i.* FROM invoices i JOIN runs r ON r.id = i.id WHERE r.model IS NOT 'history' ORDER BY r.file_name").all() as Record<string, unknown>[]).map((row) => {
+        const { id: _id, run_id: _runId, created_at: _created, ...rest } = row;
+        return rest;
+      });
+      const snap = loadSnapshot(rig.db);
+      const balances = snap.pos.map((po) => poBalance(po, snap.invoices));
+      const assigned = rig.db.prepare("SELECT r.file_name AS file_name, a.assignee FROM run_assignments a JOIN runs r ON r.id = a.run_id ORDER BY r.file_name").all() as { file_name: string; assignee: string }[];
+      const executions = countOf(rig.db, "workflow_executions");
+      return { runs, invoices, balances, assigned, executions, sent: sender.sent };
+    };
+    const without = await snapshotOf(false);
+    const withAll = await snapshotOf(true);
+    t.eq(withAll.runs, without.runs, "the runs rows");
+    t.eq(withAll.invoices, without.invoices, "the invoices rows");
+    t.eq(withAll.balances, without.balances, "every PO balance");
+    t.eq(without.executions, 0, "the control run started no automation");
+    t.ok(withAll.executions >= 5, `the automations really ran (${withAll.executions} executions)`);
+    t.eq(withAll.assigned.map((a) => [a.file_name, a.assignee]), [
+      ["03-split-po-overbill.pdf", "AP lead"],
+      ["05-scanned-no-po.pdf", "AP clerk"],
+      ["06-bank-change.pdf", "AP clerk"],
+      ["09-prompt-injection.pdf", "Finance security"],
+      ["10-not-an-invoice.pdf", "AP clerk"],
+    ]);
+    t.eq(withAll.sent.length, 2, "the two rejected samples (4 and 8) were posted to the chat");
+    t.ok(withAll.sent.every((s) => s.url === "https://hooks.example.com/T000/B000/rej1" && s.text.startsWith("Rejected: ")), "to the rejection automation's URL");
+  });
+
+  await t.test("a reset through the route removes executions, notes and assignments, and brings the seeds back", async () => {
+    await resetViaRoute(t);
+    const db = getDb();
+    const id = await runSampleViaRoute(t, "03-split-po-overbill.pdf");
+    await automationsIdle();
+    t.eq(executionsForRun(db, id).map((e) => e.status), ["success"], "the route's default pipeline dispatches to the real engine");
+    t.eq(assignmentForRun(db, id)?.assignee, "AP lead");
+    db.prepare("INSERT INTO workflows (id, name, enabled, trigger_type, graph, created_at, updated_at) VALUES ('mine', 'Mine', 0, 'run_finished', '{}', ?, ?)").run(FIXED_NOW.toISOString(), FIXED_NOW.toISOString());
+    await resetViaRoute(t);
+    t.eq(listWorkflows(db).map((w) => w.seed_key), ["route-holds", "chat-rejections", "daily-holds"], "the user-made automation is gone, the seeds are back");
+    t.eq([countOf(db, "workflow_executions"), countOf(db, "workflow_execution_steps"), countOf(db, "run_notes"), countOf(db, "run_assignments")], [0, 0, 0, 0]);
+    t.eq(getExecution(db, "none"), null);
+  });
+}
+
 async function startupGroup(t: Check): Promise<void> {
   const Mod = instrumentation;
 
@@ -2761,6 +2913,7 @@ async function startupGroup(t: Check): Promise<void> {
 
   await t.test("no network call was attempted anywhere in this script", () => {
     t.eq(blockedFetches, 0, "globalThis.fetch was never called");
+    t.eq(blockedHttps, 0, "https.request was never called");
   });
 }
 
@@ -2779,6 +2932,7 @@ async function main(): Promise<number> {
     await harness.group("routes", (t) => routesGroup(guarded(t)));
     await harness.group("reset", (t) => resetGroup(guarded(t)));
     await harness.group("review", (t) => reviewGroup(guarded(t)));
+    await harness.group("automations", (t) => automationsGroup(guarded(t)));
     await harness.group("startup", (t) => startupGroup(guarded(t)));
     releaseGates();
     let drainTimer: NodeJS.Timeout | undefined;

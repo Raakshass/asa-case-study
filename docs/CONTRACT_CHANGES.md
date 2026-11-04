@@ -269,3 +269,10 @@ Entry format:
 - Tests: check group `automations` (22 more tests: the seeds' routing, idempotent dispatch, skipped steps, the variables, the split by decision, test executions, the data steps, the summary, preview and live sends, the send and execution limits, retries with 1 s and 4 s sleeps, a reset during a slow send, pause and `AUTOMATIONS_ENABLED=false`, a throwing step, and the sender's allow-list, address, refusal, connection, answer and deadline cases). `test:api` still ends with "fetch was never called".
 - Why: Automations plan tasks A4 and A5.
 - Affects: nothing yet; the pipeline calls the engine from A6.
+
+## 2026-11-04 Automations A6 - src/lib/pipeline.ts (one optional dependency added)
+- Before: a finished run was only returned to its caller.
+- After: `PipelineDeps.onFinished?: (runId) => void`, called once after a run settles (done or error), inside a try that swallows anything it throws; `defaultPipelineDeps()` wires it to `dispatchRunFinished(defaultAutomationDeps(), id)`. `resolveDeps` wires the same only when the caller did not inject a database, so every existing test that passes `db` keeps exactly its behaviour. The routes call `enqueue(runId)` with no deps and so get the real dispatch.
+- Tests: `scripts/test-api.ts` group "automations" (6 tests: the hook fires once per run in order; samples 3 and 9 are routed (store level); a second dispatch starts nothing; an injected database gets none; a throwing hook changes nothing; the invariant: all ten samples give identical `runs` rows, `invoices` rows and PO balances with every automation on as without, with 5 assignments matching the plan's table and 2 chat posts; a reset through the route). `test-api` also blocks `https.request` and asserts at the end that it was never called.
+- Why: Automations plan task A6 (and decision D3: automations never change a decision).
+- Affects: nothing a client sees; a run now also queues automation executions after it finishes.
