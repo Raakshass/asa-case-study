@@ -1087,17 +1087,21 @@ async function pipelineGroup(t: Check): Promise<void> {
       // 15 million "q Q" operators: a valid PDF without text that keeps the worker busy for about 3 s
       const flood = await opFloodPdf(15_000_000);
       const held: Buffer[] = [];
-      // the main thread grows by 512 MB meanwhile (what eight 10 MB uploads finishing at once used to cost)
-      const grow = setInterval(() => {
-        if (held.length < 32) held.push(Buffer.alloc(16 * 1024 * 1024, 1));
-      }, 10);
+      // the main thread grows by 512 MB meanwhile (what eight 10 MB uploads finishing at once used to cost). It yields to the
+      // event loop between allocations and is awaited together with the read, so the amount allocated does not depend on how
+      // fast the read is (a busy machine used to reach only 352 to 480 MB).
+      const grow = (async () => {
+        while (held.length < 32) {
+          held.push(Buffer.alloc(16 * 1024 * 1024, 1));
+          await sleep(10);
+        }
+      })();
       try {
-        const r = await pdfMod.validateUploadWithin(flood, 60_000);
+        const [r] = await Promise.all([pdfMod.validateUploadWithin(flood, 60_000), grow]);
         t.ok(held.length === 32, `the main thread really grew by 512 MB during the read (${held.length * 16} MB)`);
         t.ok(r.ok, `the flood is a valid PDF with no text, not rejected (${r.ok ? "ok" : `${r.code}: ${r.reason}`})`);
         t.eq(r.ok ? r.textItems.length : -1, 0, "no text items");
       } finally {
-        clearInterval(grow);
         held.length = 0;
       }
       const after = await pdfMod.validateUpload(sampleBytes("01-happy-northwind.pdf"));
@@ -1116,14 +1120,15 @@ async function pipelineGroup(t: Check): Promise<void> {
       return new Promise<never>(() => undefined);
     };
     takeLogs();
-    await withConfig({ stageTimeoutMs: 300 }, async () => {
+    // 1.5 s, not 300 ms: the deadline applies to every stage, and on a busy machine ingest itself used to time out first
+    await withConfig({ stageTimeoutMs: 1_500 }, async () => {
       const started = Date.now();
       const both = Promise.all([enqueue(stuck, rig.deps({ extract: never })), enqueue(next, rig.deps())]);
       let guard: NodeJS.Timeout | undefined;
-      const timeout = new Promise<never>((_, reject) => (guard = setTimeout(() => reject(new Error("the queue is still blocked after 5 s")), 5_000)));
+      const timeout = new Promise<never>((_, reject) => (guard = setTimeout(() => reject(new Error("the queue is still blocked after 15 s")), 15_000)));
       await Promise.race([both, timeout]).finally(() => clearTimeout(guard));
       const took = Date.now() - started;
-      t.ok(took >= 280 && took < 3_000, `both runs finished ${took} ms later (deadline 300 ms)`);
+      t.ok(took >= 1_400 && took < 8_000, `both runs finished ${took} ms later (deadline 1500 ms)`);
     });
     const run = runRow(rig.db, stuck);
     const steps = stepRows(rig.db, stuck);
@@ -1941,7 +1946,10 @@ async function routesGroup(t: Check): Promise<void> {
     t.eq(head.body, null, "no body");
     t.eq((await fileRoute.HEAD(headReq("abc"), hashContext("abc"))).status, 400, "HEAD with a bad hash");
     t.eq((await fileRoute.HEAD(headReq("x"), hashContext("a".repeat(64)))).status, 404, "HEAD for an unknown hash");
-    const openFds = (): number => fs.readdirSync("/dev/fd").length;
+    // /dev/fd does not exist on Windows (not a deployment target): the descriptor count is skipped there, the rest still runs
+    const canCountFds = process.platform !== "win32";
+    if (!canCountFds) t.skip("HEAD and unread GET bodies: open descriptor count", "/dev/fd does not exist on Windows");
+    const openFds = (): number => (canCountFds ? fs.readdirSync("/dev/fd").length : 0);
     const before = openFds();
     for (let i = 0; i < 200; i++) {
       // what Next does when it answers HEAD through GET: the body is dropped, never read or cancelled
@@ -2309,7 +2317,10 @@ async function resetGroup(t: Check): Promise<void> {
     for (const name of keep) fs.writeFileSync(path.join(dir, name), "keep me");
     fs.writeFileSync(path.join(dir, `${hashA}.pdf`), "wipe me");
     fs.mkdirSync(path.join(dir, `${"d".repeat(64)}.pdf`));
-    fs.symlinkSync(path.join(dir, "notes.txt"), path.join(dir, `${"9".repeat(64)}.pdf`));
+    // creating a symlink needs elevation on Windows (not a deployment target): that part is skipped there
+    const canSymlink = process.platform !== "win32";
+    if (canSymlink) fs.symlinkSync(path.join(dir, "notes.txt"), path.join(dir, `${"9".repeat(64)}.pdf`));
+    else t.skip("reset leaves a symlink with a hash name alone", "symlinks need elevation on Windows");
     t.ok(uploadsListing().filter((n) => /^[a-f0-9]{64}\.pdf$/.test(n)).length >= 3, "there are hash-named entries to wipe");
 
     limiter.resetRateLimits();
@@ -2327,7 +2338,7 @@ async function resetGroup(t: Check): Promise<void> {
     const left = uploadsListing();
     t.eq(left.filter((n) => /^[a-f0-9]{64}\.pdf$/.test(n) && fs.lstatSync(path.join(dir, n)).isFile()), [], "no hash-named regular file is left");
     t.eq(keep.every((n) => left.includes(n)), true, "files that do not match the hash pattern are kept");
-    t.ok(left.includes(`${"d".repeat(64)}.pdf`) && left.includes(`${"9".repeat(64)}.pdf`), "a directory and a symlink with hash names are left alone");
+    t.ok(left.includes(`${"d".repeat(64)}.pdf`) && (!canSymlink || left.includes(`${"9".repeat(64)}.pdf`)), "a directory and a symlink with hash names are left alone");
     t.eq((await runsRoute.POST(postJson({ sample: "nope" }, crowd))).status, 429, "reset did not clear the rate limiter");
     for (const name of [...keep, `${"9".repeat(64)}.pdf`]) fs.rmSync(path.join(dir, name), { force: true });
     fs.rmSync(path.join(dir, `${"d".repeat(64)}.pdf`), { recursive: true, force: true });
