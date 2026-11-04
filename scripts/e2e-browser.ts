@@ -120,7 +120,8 @@ function watch(page: Page): Watch {
     if (!r.url().startsWith(new URL(BASE).origin)) return; // e.g. the browser's own PDF viewer frame, aborted on navigation
     const failure = r.failure()?.errorText ?? "failed";
     // a poll or a prefetch aborted by a navigation or an unmount is the app working as intended
-    if (failure.includes("ERR_ABORTED") && (r.resourceType() === "fetch" || r.url().includes("_rsc="))) return;
+    // a run page's PDF frame is aborted when the next page.goto leaves it: normal navigation, and slower machines see it
+    if (failure.includes("ERR_ABORTED") && (r.resourceType() === "fetch" || r.url().includes("_rsc=") || new URL(r.url()).pathname.startsWith("/api/files/"))) return;
     w.problems.push(`request failed: ${r.method()} ${new URL(r.url()).pathname} (${failure})`);
   });
   page.on("response", (r: PwResponse) => {
