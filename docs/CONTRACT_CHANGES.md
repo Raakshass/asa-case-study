@@ -337,3 +337,10 @@ Entry format:
 - Tests: `scripts/test-api.ts` +2 (both flags: three comments refused, the combined one accepted; a statement cannot be approved and nothing changes, REJECT works); `scripts/e2e-browser.ts` +1 (a statement on hold offers no Approve).
 - Why: the testing report of 2026-11-05 (M1, M2).
 - Affects: a client that offered Approve for any hold must now expect the 409.
+
+## 2026-11-05 GET /api/health - src/app/api/health/route.ts (one endpoint added)
+- Before: the docs used `/api/master` as the health check; it loads the vendors and every PO balance on each poll.
+- After: `GET /api/health` (and `HEAD`) answers `200 { ok: true }` after a single `SELECT 1`, with `Cache-Control: no-store`; it reads no table, writes nothing and is not rate limited, so a monitor can poll it every few minutes. A database that cannot be opened or queried gives `503 { error: "The database is not available." }` (fixed text), so a deploy with an unwritable `DATA_DIR` still fails the check. No version, path, count or error text is returned.
+- Tests: `scripts/test-api.ts` +1 (200 and body, HEAD, 60 polls never refused, a closed database is a fixed 503 for GET and HEAD, then 200 again); `scripts/smoke-http.ts` +2 (the content and 30 polls; the baseline security headers and CSP on the path).
+- Why: a host health check or an external pinger every 5 minutes (Render's free instances sleep after 15 minutes without traffic).
+- Affects: nobody.

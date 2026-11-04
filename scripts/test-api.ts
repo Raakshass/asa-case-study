@@ -140,6 +140,7 @@ const runRoute = load<typeof import("../src/app/api/runs/[id]/route")>("src/app/
 const fileRoute = load<typeof import("../src/app/api/files/[hash]/route")>("src/app/api/files/[hash]/route");
 const samplesRoute = load<typeof import("../src/app/api/samples/route")>("src/app/api/samples/route");
 const masterRoute = load<typeof import("../src/app/api/master/route")>("src/app/api/master/route");
+const healthRoute = load<typeof import("../src/app/api/health/route")>("src/app/api/health/route");
 const resetRoute = load<typeof import("../src/app/api/reset/route")>("src/app/api/reset/route");
 const reviewRoute = load<typeof import("../src/app/api/runs/[id]/review/route")>("src/app/api/runs/[id]/review/route");
 const automationsRoute = load<typeof import("../src/app/api/automations/route")>("src/app/api/automations/route");
@@ -1495,6 +1496,30 @@ async function routesGroup(t: Check): Promise<void> {
     const body = parsed(t, SampleListSchema, await res.json(), "samples");
     t.eq(body.map((s) => s.file), [...SAMPLE_FILES]);
     t.eq(body.map((s) => s.expected), samples.map((s) => s.meta.expectedDecision));
+  });
+
+  await t.test("GET /api/health: 200 { ok: true } with no body detail, HEAD the same without a body, never rate limited; a database that cannot answer is a fixed 503", async () => {
+    const res = await healthRoute.GET();
+    t.eq([res.status, res.headers.get("cache-control"), res.headers.get("content-type")], [200, "no-store", "application/json; charset=utf-8"]);
+    t.eq(await res.json(), { ok: true }, "nothing but ok");
+    const head = await healthRoute.HEAD();
+    t.eq([head.status, head.body, head.headers.get("cache-control")], [200, null, "no-store"], "HEAD");
+    for (let i = 0; i < 60; i++) if ((await healthRoute.GET()).status !== 200) t.fail(`poll ${i + 1} was refused`);
+    // a connection that cannot answer: the cached handle is swapped for a closed one, then put back
+    const g = globalThis as { __invoiceApDb?: { db: DB; file: string } };
+    const real = g.__invoiceApDb as { db: DB; file: string };
+    const closed = openDb(":memory:");
+    closed.close();
+    g.__invoiceApDb = { db: closed, file: real.file };
+    try {
+      const down = await healthRoute.GET();
+      t.eq(down.status, 503);
+      t.eq(await down.json(), { error: "The database is not available." }, "fixed text, no detail");
+      t.eq((await healthRoute.HEAD()).status, 503, "HEAD too");
+    } finally {
+      g.__invoiceApDb = real;
+    }
+    t.eq((await healthRoute.GET()).status, 200, "and back");
   });
 
   await t.test("GET /api/master: vendors with masked banks, POs with balances; never a raw account number", async () => {

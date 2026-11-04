@@ -6,7 +6,7 @@ For the owner presenting the Invoice AP Agent. Labels in **bold** are the exact 
 
 ## 1. Pre-flight checklist (15 minutes before)
 
-- [ ] **Deploy is healthy.** `curl -s -o /dev/null -w '%{http_code}\n' https://<your-domain>/api/master` prints `200`.
+- [ ] **Deploy is healthy.** `curl -s -o /dev/null -w '%{http_code}\n' https://<your-domain>/api/health` prints `200` (on Render's free tier the first request after a sleep takes about a minute).
 - [ ] **Key and models set** in the Railway service's **Variables**: `OPENROUTER_API_KEY`, `EXTRACT_MODEL=google/gemini-3.8-flash`, `FALLBACK_MODEL=anthropic/claude-haiku-5.5`, and no `EXTRACT_MOCK`.
 - [ ] **Credit limit** on the OpenRouter key (for example $5) with credit left. A demo is about 10 to 15 runs; the research estimate (not measured) is $0.01 to $0.02 per invoice on Gemini 3.8 Flash.
 - [ ] **Free route instead** (no credit; README, "Free route"): `EXTRACT_MODEL=nvidia/nemotron-3.5-super-vl:free` and no `FALLBACK_MODEL`. Expect 3 to 25 s per sample (one of ten live runs took 58 s). OpenRouter allows 50 free requests a day and a full run of the ten samples makes 11 (the scan makes two model calls), so rehearse once, not more, on the same day; the quota resets at 00:00 UTC (05:30 IST). **Sample 5 (the scan) needs paid OCR** (about $0.002): on a key with no credit it can fail with "LLM provider unavailable (billing/auth)" and the run is held. On Render's free tier open the URL 2 to 3 minutes early (it sleeps after 15 minutes without traffic) and reset the demo data, because its storage is wiped on every restart.
@@ -129,4 +129,4 @@ Sample 5: the model reads the image (Gemini takes PDFs natively according to Ope
 Some patterns are broad ("override", "system:", "assistant:"), so an ordinary invoice can be held for review. That costs a manual review, never a payment or a rejection. The trade-off is listed in ASSUMPTIONS.md.
 
 **10. How do you know it works?**
-298 rule, guardrail and automation checks on the real samples, 103 tests of the extraction code against a fake OpenRouter, 113 API tests, a 53-check HTTP smoke test and a 72-check real-browser test against the production build (also in a by-hand replay of the Docker image's layout on Node 22), and 20 static checks of the source and the client bundle. All pass on the final code. What they cannot prove is how a real model reads these invoices: that is the eval run.
+298 rule, guardrail and automation checks on the real samples, 103 tests of the extraction code against a fake OpenRouter, 114 API tests, a 55-check HTTP smoke test and a 72-check real-browser test against the production build (also in a by-hand replay of the Docker image's layout on Node 22), and 20 static checks of the source and the client bundle. All pass on the final code. What they cannot prove is how a real model reads these invoices: that is the eval run.

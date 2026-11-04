@@ -267,6 +267,13 @@ async function sectionPlan(): Promise<void> {
     eq(list.map((s) => s.expected), samples.map((s) => s.meta.expectedDecision), "expected decisions");
     ok(list.every((s) => s.title !== "" && s.scenario !== ""), "titles and scenarios");
   });
+  await check(S, "GET /api/health -> 200 { ok: true } (HEAD: 200, no body); polled 30 times in a row it is never refused", async () => {
+    const res = await http("/api/health", { ip: IP.plan });
+    eq([res.status, res.json], [200, { ok: true }], "GET");
+    const head = await http("/api/health", { ip: IP.plan, method: "HEAD" });
+    eq([head.status, head.text], [200, ""], "HEAD");
+    for (let i = 0; i < 30; i++) eq((await http("/api/health", { ip: IP.plan })).status, 200, `poll ${i + 1}`);
+  });
   await check(S, "GET /api/runs/<unknown uuid> -> 404, /api/runs/not-a-uuid -> 400", async () => {
     eq((await http("/api/runs/00000000-0000-4000-8000-000000000000", { ip: IP.plan })).status, 404, "unknown id");
     eq((await http("/api/runs/not-a-uuid", { ip: IP.plan })).status, 400, "bad id");
@@ -407,6 +414,7 @@ async function sectionHeaders(): Promise<void> {
     ["/api/no-such-route", {}],
     ["/", {}],
     ["/automations", {}],
+    ["/api/health", {}],
     ["/api/runs", { method: "POST", body: "{not json", headers: { "content-type": "application/json" } }],
   ];
   for (const [p, init] of paths) {
