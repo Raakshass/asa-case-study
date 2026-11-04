@@ -25,7 +25,6 @@ import {
   type OnEdgesChange,
   type OnNodeDrag,
   type OnNodesChange,
-  type OnSelectionChangeFunc,
   type ProOptions,
 } from "@xyflow/react";
 import { Maximize, ZoomIn, ZoomOut } from "lucide-react";
@@ -248,10 +247,16 @@ function CanvasInner({ graph, selected, problems, overlay, onSelect, onConnect, 
   }, [derivedNodes, derivedEdges, syncTick]);
 
   /* positions, selection and sizes; a removal never changes the local copy: it goes to the editor, and comes back as a new graph */
-  const onNodesChange: OnNodesChange<StepNode> = useCallback((changes) => {
-    const kept = changes.filter((c) => c.type !== "remove");
-    if (kept.length > 0) setNodes((prev) => applyNodeChanges(kept, prev));
-  }, []);
+  const onNodesChange: OnNodesChange<StepNode> = useCallback(
+    (changes) => {
+      // Selection flows one way out of React Flow: a "select" change only ever comes from the person, never from the nodes prop.
+      const picks = changes.filter((c) => c.type === "select");
+      if (picks.length > 0) onSelect(picks.find((c) => c.selected)?.id ?? null);
+      const kept = changes.filter((c) => c.type !== "remove");
+      if (kept.length > 0) setNodes((prev) => applyNodeChanges(kept, prev));
+    },
+    [onSelect],
+  );
   const onEdgesChange: OnEdgesChange<LabelledEdgeType> = useCallback((changes: EdgeChange<LabelledEdgeType>[]) => {
     const kept = changes.filter((c) => c.type !== "remove");
     if (kept.length > 0) setEdges((prev) => applyEdgeChanges(kept, prev));
@@ -292,8 +297,6 @@ function CanvasInner({ graph, selected, problems, overlay, onSelect, onConnect, 
     },
     [movesFrom, nodes, onMoveEnd, readOnly],
   );
-
-  const onSelectionChange: OnSelectionChangeFunc<StepNode, LabelledEdgeType> = useCallback(({ nodes: picked }) => onSelect(picked[0]?.id ?? null), [onSelect]);
 
   /* connections: React Flow only calls onConnect for a valid one, so a refusal is reported when the connection ends */
   const isValidConnection = useCallback(
@@ -384,7 +387,6 @@ function CanvasInner({ graph, selected, problems, overlay, onSelect, onConnect, 
         onConnectEnd={handleConnectEnd}
         isValidConnection={isValidConnection}
         onNodeDragStop={onNodeDragStop}
-        onSelectionChange={onSelectionChange}
         onBeforeDelete={onBeforeDelete}
         deleteKeyCode="Delete"
         selectionKeyCode={null}

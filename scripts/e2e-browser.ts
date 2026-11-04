@@ -1061,6 +1061,28 @@ async function sectionAutomations(page: Page): Promise<void> {
     await page.getByRole("button", { name: "Undo", exact: true }).click();
     eq(await page.locator('li[data-step-row="note-1"]').count(), 0, "undo removed the new step (it is not saved)");
   });
+  await check("automations", "canvas: a palette step added by click and by drag lands selected, the editor survives, Undo takes both back, Enter selects a focused step", async () => {
+    await page.goto(`${BASE}/automations/${routeId}`);
+    const nodes = page.locator(".react-flow__node");
+    await nodes.first().waitFor();
+    await page.waitForTimeout(1200);
+    const start = await nodes.count();
+    await page.locator('[data-palette="action.note"]').click();
+    await nodes.nth(start).waitFor({ timeout: 5000 });
+    eq(await page.locator(".react-flow__node.selected").count(), 1, "the added step is the selected one");
+    await page.locator('[data-palette="action.chat"]').dragTo(page.locator(".react-flow__pane"), { targetPosition: { x: 200, y: 60 } });
+    await nodes.nth(start + 1).waitFor({ timeout: 5000 });
+    eq(await nodes.count(), start + 2, "the drag added a step");
+    for (let i = 0; i < 2; i++) await page.getByRole("button", { name: "Undo", exact: true }).click();
+    // the canvas follows the graph one render later: wait for the count instead of reading it at once
+    await page.waitForFunction((n) => document.querySelectorAll(".react-flow__node").length === n, start, { timeout: 5000 }).catch(() => undefined);
+    eq(await nodes.count(), start, "Undo took both back");
+    await page.locator(".react-flow__pane").click({ position: { x: 30, y: 30 } });
+    await nodes.first().focus();
+    await page.keyboard.press("Enter");
+    eq(await page.locator(".react-flow__node.selected").count(), 1, "Enter selects the focused step");
+    eq(takeProblems(page), [], "browser console and network");
+  });
   await check("automations", "sample 3's run page lists the automation that ran for it, with 'Assigned to AP lead'", async () => {
     const runs = (await (await page.request.get(`${BASE}/api/runs?limit=200`)).json()) as { runs: { id: string; file_name: string | null }[] };
     const three = runs.runs.find((r) => r.file_name === "03-split-po-overbill.pdf");

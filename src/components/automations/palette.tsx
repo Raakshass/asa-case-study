@@ -59,7 +59,7 @@ export function Palette({ onAdd, disabled = false }: PaletteProps) {
                     onClick={() => onAdd(type)}
                     onDragStart={(e) => {
                       e.dataTransfer.setData(PALETTE_DRAG_MIME, type);
-                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.effectAllowed = "copy";
                     }}
                     className="flex min-h-8 w-full items-center gap-2 rounded-md bg-card px-2 py-1 text-left text-sm ring-1 ring-foreground/10 hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-60"
                   >
