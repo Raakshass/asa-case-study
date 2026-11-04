@@ -349,6 +349,7 @@ export async function run(t: Check): Promise<void> {
   await t.test("A1: an unknown value in a template is reported by validateGraph and listed as missing when rendered", () => {
     t.eq(messages(withNote("Hello {{run.nope}}")), ["Unknown value {{run.nope}}."]);
     t.eq(renderTemplate("Hello {{run.nope}}", {}, "none").missing, ["run.nope"]);
+    for (const stray of ["{{ Run.Total }}", "{{process.env.X}}", "{{__proto__.toString}}"]) t.eq(messages(withNote(`A ${stray} B`)), [`Unknown value ${stray}.`], stray);
   });
 
   await t.test("A1: evaluateCondition, every operator against an absent value, null, a match and a non-match", () => {

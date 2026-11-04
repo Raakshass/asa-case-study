@@ -548,6 +548,8 @@ const cut = (text: string, max: number): string => (text.length > max ? `${text.
 /** "Unknown value", "not available here" and the variable checks of one template. */
 function templateProblems(node: GraphNode, template: string, avail: Set<VarSource> | undefined): GraphProblem[] {
   const problems: GraphProblem[] = [];
+  // anything that looks like a value but is not spelled like one would go out as literal text
+  for (const stray of template.replace(TOKEN, "").match(/\{\{.*?\}\}/g) ?? []) problems.push({ node_id: node.id, message: `Unknown value ${cut(stray, 40)}.` });
   for (const name of templateVars(template)) {
     if (!isVarName(name)) {
       problems.push({ node_id: node.id, message: `Unknown value {{${name}}}.` });
