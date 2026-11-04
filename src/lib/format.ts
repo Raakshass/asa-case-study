@@ -30,11 +30,10 @@ export function formatPct(fraction: number): string {
   return `${(fraction * 100).toFixed(1)}%`;
 }
 
-/** Masks all but the last 4 characters: "ACC-11-2233" -> "••••2233". null stays null. */
+/** Masks all but the last 4 characters: "ACC-11-2233" -> "••••2233". A value of 6 or fewer characters is fully masked. null stays null. */
 export function maskAccount(value: string | null): string | null {
   if (value === null) return null;
-  const tail = value.slice(-4);
-  return `••••${tail}`;
+  return value.length <= 6 ? "••••" : `••••${value.slice(-4)}`; // a short value would be shown nearly whole (review round B12)
 }
 
 const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;

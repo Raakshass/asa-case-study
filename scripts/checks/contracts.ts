@@ -513,6 +513,8 @@ export async function run(t: Check): Promise<void> {
     t.eq(daysBetweenIso("2026-09-30", "2026-10-31"), 31);
     t.eq([isIsoDate("2026-02-28"), isIsoDate("2026-02-30"), isIsoDate("28/02/2026")], [true, false, false]);
     t.eq(maskAccount("ACC-11-2233"), "••••2233");
+    t.eq(maskAccount("1234"), "••••", "a short value is never shown whole (review round B12)");
+    t.eq([maskAccount("123456"), maskAccount("1234567"), maskAccount(""), maskAccount(null)], ["••••", "••••4567", "••••", null]);
   });
 
   await t.test("pdf primitives: sha256, display names, magic bytes", () => {
