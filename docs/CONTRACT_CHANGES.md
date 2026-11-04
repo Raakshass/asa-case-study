@@ -300,3 +300,14 @@ Entry format:
 - Tests: `scripts/test-api.ts` group "automations" (12 more: the list and the seeds' problems, the token on every change, create, versioned saves, cycle and turn-off, secrets never returned, the two routed samples, executions and their detail, a test with a preview and the refused real send, delete, the write limit, recovery on a real file); `scripts/smoke-http.ts` +3.
 - Why: Automations plan task A8.
 - Affects: nobody (no page uses them yet).
+
+## 2026-11-04 Automations A7 and A9 - package.json, src/app/automations/page.tsx, src/components/automations/*, src/components/run/run-automations.tsx, nav-links.tsx (a dependency, a page, a section)
+- Before: no page for automations; the run page ended with the stepper, the PDF and the extracted fields.
+- After:
+  - **Dependency.** `@xyflow/react` 12.12.0, pinned exactly (MIT; the one new runtime dependency, for the canvas of A10). The lock file gains only its own entries.
+  - **Navigation.** A fourth link, "Automations" (`/automations`, active on `/automations/*`).
+  - **List page.** `/automations`: a table from 640 px and a list below it (no sideways scrolling at 375 px) with each automation's name (the row's one link), what starts it, an On/Off switch (`<button role="switch">`, the visible words On and Off, the name "Turn <name> on/off"), its last run (status as an icon and a word) and its executions in the last 24 hours. A "New automation" `<dialog>` creates one from a seed or a blank start. Turning one on or off and creating one need the operator token: `TokenPrompt` asks inline when the tab has none, and the token (kept in sessionStorage under the one shared key) is forgotten when the server refuses it.
+  - **Run page.** A last section, "Automations" (skipped for a pre-loaded history record), shows which automations ran for the invoice, how they went, who it was assigned to and the notes they wrote, polling until nothing is queued or running and three seconds have passed since the run finished; empty, it says "No automation ran for this invoice." with a link to `/automations`. It is the last element of the page, so it adds no Tab stop before the stepper.
+- Tests: `scripts/smoke-http.ts` +1 (`/automations` sends the baseline headers and a CSP); the e2e of the existing pages still passes with the extra navigation link.
+- Why: Automations plan tasks A7 and A9.
+- Affects: every page has one more navigation link.

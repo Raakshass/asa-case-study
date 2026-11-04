@@ -13,6 +13,7 @@ import { DecisionCard } from "./decision-card";
 import { ExtractedFields } from "./extracted-fields";
 import { HistoryRecord } from "./history-record";
 import { PdfPanel } from "./pdf-panel";
+import { RunAutomations } from "./run-automations";
 import { ReviewPanel } from "./review-panel";
 import { InvalidRun, RunNotFound, RunSkeleton } from "./run-states";
 import { displayText, formatDate, formatDateTime, isUuid } from "./run-format";
@@ -123,6 +124,7 @@ export function RunView({ id }: RunViewProps) {
             {run.is_history ? null : <ExtractedFields run={run} />}
           </div>
         </div>
+        {run.is_history ? null : <RunAutomations runId={run.id} finished={run.status === "done" || run.status === "error"} finishedAt={run.finished_at} />}
       </div>
     );
   } else if (error) {
