@@ -406,6 +406,7 @@ async function sectionHeaders(): Promise<void> {
     ["/api/runs/not-a-uuid", {}],
     ["/api/no-such-route", {}],
     ["/", {}],
+    ["/automations", {}],
     ["/api/runs", { method: "POST", body: "{not json", headers: { "content-type": "application/json" } }],
   ];
   for (const [p, init] of paths) {
