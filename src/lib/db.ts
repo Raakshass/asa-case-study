@@ -49,6 +49,21 @@ CREATE INDEX IF NOT EXISTS idx_inv_vendor_num ON invoices(vendor_id, invoice_num
 CREATE INDEX IF NOT EXISTS idx_inv_hash ON invoices(file_hash);
 `;
 
+/**
+ * Tables added after the plan's section 4 (review round B4 onward). SCHEMA_SQL stays the plan's section 4 verbatim
+ * (scripts/checks/contracts.ts asserts it), so every later table lives here. Idempotent, like SCHEMA_SQL.
+ */
+export const EXTRA_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS run_reviews (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE,
+  action TEXT NOT NULL,                       -- APPROVE|REJECT
+  comment TEXT NOT NULL,
+  po_number TEXT,                             -- the PO the reviewer confirmed (APPROVE only)
+  previous_decision TEXT NOT NULL,            -- always HOLD today
+  created_at TEXT NOT NULL
+);
+`;
+
 /** runs.decision_reasons of a run found queued/running at startup (plan section 4). */
 export const INTERRUPTED_REASON = "Interrupted by restart, please re-run";
 export const INTERRUPTED_NEXT_ACTION = "Re-run this invoice.";
@@ -70,6 +85,7 @@ export function openDb(file: string, opts: OpenDbOptions = {}): DB {
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
   db.exec(SCHEMA_SQL);
+  db.exec(EXTRA_SCHEMA_SQL);
   if (opts.recover) recoverInterruptedRuns(db);
   return db;
 }

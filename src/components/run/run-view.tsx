@@ -13,6 +13,7 @@ import { DecisionCard } from "./decision-card";
 import { ExtractedFields } from "./extracted-fields";
 import { HistoryRecord } from "./history-record";
 import { PdfPanel } from "./pdf-panel";
+import { ReviewPanel } from "./review-panel";
 import { InvalidRun, RunNotFound, RunSkeleton } from "./run-states";
 import { displayText, formatDate, formatDateTime, isUuid } from "./run-format";
 import { Stepper } from "./stepper";
@@ -112,6 +113,7 @@ export function RunView({ id }: RunViewProps) {
           </p>
         ) : null}
         <DecisionCard run={run} />
+        {run.status === "done" && run.decision === "HOLD" && run.review === null && !run.is_history ? <ReviewPanel run={run} onReviewed={() => void refresh()} /> : null}
         <div className="grid gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-start">
           <div className="min-w-0 space-y-6">
             {run.is_history ? <HistoryRecord run={run} entry={entry} loading={list.loading} /> : <Stepper run={run} />}

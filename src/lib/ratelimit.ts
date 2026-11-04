@@ -221,6 +221,52 @@ export function refundGlobalSlot(at: number): void {
   if (i >= 0) s.global.splice(i, 1);
 }
 
+/* ---- changes made by a person (review round B4) ---- */
+
+type GlobalWithWrites = typeof globalThis & { __invoiceApWriteLimit?: { perIp: Map<string, number[]>; lastSweep: number } };
+
+/**
+ * A separate per-address sliding window for writes a person makes (a hold review, later automations): at most
+ * CONFIG.writeLimitPerIpPerMinute a minute. It is NOT the run quota: that one carries an hourly cap for model credit
+ * and a "Too many runs" message, and a review must not fail because smoke or e2e used the hour's runs up. Only allowed
+ * calls are remembered, so a client stuck at 429 does not extend its own wait.
+ */
+export function checkWriteLimit(ip: string, now: number = Date.now()): RateLimitResult {
+  const t = Number.isFinite(now) ? now : Date.now();
+  const g = globalThis as GlobalWithWrites;
+  g.__invoiceApWriteLimit ??= { perIp: new Map(), lastSweep: 0 };
+  const s = g.__invoiceApWriteLimit;
+  if (t - s.lastSweep >= MINUTE_MS || t < s.lastSweep) {
+    for (const [key, times] of s.perIp) {
+      prune(times, t, MINUTE_MS);
+      if (times.length === 0) s.perIp.delete(key);
+    }
+    s.lastSweep = t;
+  }
+  const key = normalizeIp(ip);
+  const hits = s.perIp.get(key) ?? [];
+  prune(hits, t, MINUTE_MS);
+  if (hits.length >= CONFIG.writeLimitPerIpPerMinute) {
+    const wait = waitSeconds(hits[0], MINUTE_MS, t);
+    return { ok: false, retryAfterSec: wait, message: `Too many changes from your address. Try again in ${describeWait(wait)}.`, scope: "ip" };
+  }
+  if (!s.perIp.has(key) && s.perIp.size >= MAX_TRACKED_IPS) {
+    for (const oldest of s.perIp.keys()) {
+      s.perIp.delete(oldest);
+      break;
+    }
+  }
+  hits.push(t);
+  s.perIp.set(key, hits);
+  return { ok: true, retryAfterSec: 0, message: "", scope: null };
+}
+
+/** Clears the write counters (tests). */
+export function resetWriteLimits(): void {
+  const g = globalThis as GlobalWithWrites;
+  g.__invoiceApWriteLimit?.perIp.clear();
+}
+
 /**
  * Clears all counters (tests). Uploads in progress (beginUpload) are live requests, not counters: each one gives its
  * own place back when it is answered, so they are not cleared here.

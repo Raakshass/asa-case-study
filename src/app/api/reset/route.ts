@@ -4,30 +4,21 @@
  * Waits for the pipeline to go idle, reloads the seed data and deletes the stored uploads. It does NOT clear the
  * rate limiter, so the endpoint cannot be used to get around it.
  */
-import crypto from "node:crypto";
 import { CONFIG, ENV } from "@/lib/config";
 import { getDb } from "@/lib/db";
 import { runExclusive, whenIdle } from "@/lib/pipeline";
 import { seedDatabase } from "@/lib/seed";
 import type { ResetResponse } from "@/lib/types";
-import { apiError, json, serverError } from "../_lib/http";
+import { apiError, json, serverError, tokenMatches } from "../_lib/http";
 import { wipeUploads } from "../_lib/uploads";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const sha256Digest = (value: string): Buffer => crypto.createHash("sha256").update(value).digest();
-
-/**
- * timingSafeEqual throws on buffers of different lengths, so both sides are hashed first: two 32-byte digests
- * always compare, whatever the header holds, and the time does not depend on how long the matching prefix is.
- * The compare runs even when reset is disabled or no token is configured, so those cases look alike.
- */
+/** The token compare runs even when reset is disabled, so a disabled reset looks like a wrong token (http.ts tokenMatches). */
 function resetAllowed(req: Request): boolean {
-  const expected = ENV.demoResetToken; // null when unset or shorter than 16 characters
-  const supplied = req.headers.get("x-reset-token") ?? "";
-  const sameToken = crypto.timingSafeEqual(sha256Digest(supplied), sha256Digest(expected ?? ""));
-  return ENV.demoResetEnabled && expected !== null && sameToken;
+  const sameToken = tokenMatches(req);
+  return ENV.demoResetEnabled && sameToken;
 }
 
 /**

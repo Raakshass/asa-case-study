@@ -198,6 +198,7 @@ export async function run(t: Check): Promise<void> {
         { type: "index", name: "idx_inv_vendor_num" },
         { type: "table", name: "invoices" },
         { type: "table", name: "purchase_orders" },
+        { type: "table", name: "run_reviews" },
         { type: "table", name: "run_steps" },
         { type: "table", name: "runs" },
         { type: "table", name: "vendors" },

@@ -53,6 +53,7 @@ export const CONFIG = {
   llmRetryAfterMaxMs: 10_000, // 429 Retry-After above this skips the same-model retry
   llmRetryAfterDefaultMs: 2_000, // 429 without Retry-After
   rateLimitPerIpPerMinute: 10,
+  writeLimitPerIpPerMinute: 30, // changes made by a person (a hold review, later automations): their own window, not the run quota
   maxDisplayNameChars: 100,
 
   // ---- added at integration (docs/CONTRACT_CHANGES.md) ----

@@ -18,8 +18,10 @@ import {
   type RunListItem,
   type RunRow,
   type RunStatus,
+  type RunReview,
   type RunStepRow,
   type RunsListResponse,
+  type ReviewAction,
   type StepView,
 } from "@/lib/types";
 
@@ -88,6 +90,7 @@ export function loadRunDetail(db: DB, id: string): RunDetail | null {
     finished_at: run.finished_at,
     is_history: run.model === HISTORY_MODEL,
     steps: steps.map(toStepView),
+    review: (db.prepare("SELECT action, comment, po_number, previous_decision, created_at FROM run_reviews WHERE run_id = ?").get(id) as RunReview | undefined) ?? null,
   };
 }
 
@@ -109,6 +112,7 @@ interface ListRow {
   inv_number: string | null;
   inv_total: number | null;
   inv_currency: string | null;
+  review_action: ReviewAction | null;
 }
 
 const asText = (v: unknown): string | null => (typeof v === "string" ? v : null);
@@ -124,11 +128,12 @@ export function listRuns(db: DB, opts: { filter: RunFilter | null; limit: number
     .prepare(
       `SELECT r.id, r.created_at, r.status, r.file_name, r.decision, r.decision_reasons, r.security_flag, r.cost_usd,
               r.model, r.extraction, v.name AS vendor_name, i.invoice_number AS inv_number, i.total AS inv_total,
-              i.currency AS inv_currency
+              i.currency AS inv_currency, rv.action AS review_action
          FROM runs r
          LEFT JOIN invoices i ON i.id = r.id
          LEFT JOIN vendors v ON v.id = i.vendor_id
-        WHERE (@decision IS NULL OR r.decision = @decision) AND (@security = 0 OR r.security_flag = 1)
+         LEFT JOIN run_reviews rv ON rv.run_id = r.id
+        WHERE (@decision IS NULL OR COALESCE(rv.action, r.decision) = @decision) AND (@security = 0 OR r.security_flag = 1)
         ORDER BY r.created_at DESC, r.rowid DESC
         LIMIT @limit`,
     )
@@ -150,24 +155,26 @@ export function listRuns(db: DB, opts: { filter: RunFilter | null; limit: number
       invoice_number: row.inv_number ?? asText(ex?.invoice_number),
       total: row.inv_total ?? asNumber(ex?.total),
       currency: row.inv_currency ?? asText(ex?.currency),
-      decision: row.decision,
+      decision: row.review_action ?? row.decision, // the effective decision: a person's review replaces the machine's hold
       security_flag: row.security_flag === 1,
       first_reason: parseReasons(row.decision_reasons)[0] ?? null,
       cost_usd: row.cost_usd,
       is_history: row.model === HISTORY_MODEL,
+      reviewed: row.review_action,
     };
   });
 
   const k = db
     .prepare(
       `SELECT COUNT(*) AS total,
-              COALESCE(SUM(r.decision = 'APPROVE'), 0) AS approved,
-              COALESCE(SUM(r.decision = 'HOLD'), 0) AS hold,
-              COALESCE(SUM(r.decision = 'REJECT'), 0) AS rejected,
+              COALESCE(SUM(COALESCE(rv.action, r.decision) = 'APPROVE'), 0) AS approved,
+              COALESCE(SUM(COALESCE(rv.action, r.decision) = 'HOLD'), 0) AS hold,
+              COALESCE(SUM(COALESCE(rv.action, r.decision) = 'REJECT'), 0) AS rejected,
               COALESCE(SUM(r.security_flag = 1), 0) AS security_flags,
-              COALESCE(SUM(CASE WHEN r.decision = 'APPROVE' THEN COALESCE(i.total, 0) END), 0) AS approved_value
+              COALESCE(SUM(CASE WHEN COALESCE(rv.action, r.decision) = 'APPROVE' THEN COALESCE(i.total, 0) END), 0) AS approved_value
          FROM runs r
-         LEFT JOIN invoices i ON i.id = r.id`,
+         LEFT JOIN invoices i ON i.id = r.id
+         LEFT JOIN run_reviews rv ON rv.run_id = r.id`,
     )
     .get() as DashboardKpis;
   return {

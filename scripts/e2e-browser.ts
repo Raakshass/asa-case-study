@@ -42,7 +42,7 @@ const SHOTS = process.env.E2E_SHOTS ?? path.join(os.tmpdir(), "e2e-browser-shots
 const DATA_DIR = process.env.E2E_DATA_DIR ?? "";
 const PASSES = Math.max(1, Number.parseInt(process.env.E2E_PASSES ?? "2", 10) || 2);
 const RUN_TIMEOUT_MS = 60_000;
-const SECTIONS = ["reset", "samples", "dashboard", "data", "narrow", "keyboard", "unhappy", "xss"] as const;
+const SECTIONS = ["reset", "samples", "dashboard", "data", "narrow", "keyboard", "unhappy", "xss", "review"] as const;
 type Section = (typeof SECTIONS)[number];
 
 /* ================================================================================================
@@ -959,6 +959,53 @@ const HOSTILE = {
   bidi: "‮fdp.exe​‍ INVOICE ⁧RTL⁩ فاتورة",
 };
 
+/** Review round B4: a person resolves sample 5's hold in the browser (approve, PO-1005) and the page, the PO balance and the stamp follow. */
+async function sectionReview(page: Page): Promise<void> {
+  await check("review", "resolve sample 5's hold: approve after review with PO-1005; the stamp, the PO balance and the page follow", async () => {
+    type Listed = { runs: { id: string; file_name: string | null; decision: string | null; reviewed: string | null }[] };
+    const listed = (await (await page.request.get(`${BASE}/api/runs?limit=200`)).json()) as Listed;
+    let runId = listed.runs.find((r) => r.file_name === "05-scanned-no-po.pdf" && r.decision === "HOLD" && r.reviewed === null)?.id;
+    if (runId === undefined) {
+      // run on its own (npm run e2e -- review): no earlier run of sample 5 to resolve, so start one
+      const started = await page.request.post(`${BASE}/api/runs`, { data: { sample: "05-scanned-no-po.pdf" } });
+      eq(started.status(), 202, "sample 5 was started");
+      runId = ((await started.json()) as { runId: string }).runId;
+      let status = "";
+      for (let i = 0; i < 240 && status !== "done" && status !== "error"; i++) {
+        if (i > 0) await page.waitForTimeout(250);
+        status = ((await (await page.request.get(`${BASE}/api/runs/${runId}`)).json()) as { status: string }).status;
+      }
+      eq(status, "done", "the run finished");
+    }
+    takeProblems(page);
+    await page.goto(`${BASE}/runs/${runId}`);
+    await decisionCard(page).waitFor();
+    eq(await decisionCard(page).locator("[data-decision]").first().getAttribute("data-decision"), "HOLD", "the machine's hold comes first");
+    await page.getByRole("button", { name: "Resolve this hold" }).click();
+    await page.getByLabel("Approve after review").check();
+    const choice = page.getByLabel("PO", { exact: true });
+    if ((await choice.evaluate((el) => el.tagName)) === "SELECT") await choice.selectOption("PO-1005");
+    else await choice.fill("PO-1005");
+    await page.getByLabel("What was checked").fill("Confirmed PO-1005 with the buyer by phone.");
+    await page.getByLabel("Operator token").fill(TOKEN);
+    await page.getByRole("button", { name: "Save review" }).click();
+    await page.locator('[data-decision="APPROVE"]').first().waitFor();
+    has(await decisionCard(page).innerText(), "Approved after review", "the card says who decided");
+    has(await decisionCard(page).innerText(), "Confirmed PO-1005 with the buyer by phone.", "the card shows the comment");
+    has(await decisionCard(page).innerText(), "Queue for payment.", "the next action follows the review");
+    eq(await page.getByRole("button", { name: "Resolve this hold" }).count(), 0, "the form is gone once reviewed");
+    await page.goto(`${BASE}/data`);
+    const row = page.locator('tr[data-po="PO-1005"]');
+    await row.waitFor();
+    has(await row.innerText(), "$1,500.00", "PO-1005 has $1,500.00 left");
+    await page.goto(BASE);
+    const dashRow = page.locator(`tr[data-run-id="${runId}"]`);
+    await dashRow.waitFor();
+    has(await dashRow.innerText(), "reviewed", "the dashboard row says it was reviewed");
+    eq(takeProblems(page), [], "browser console and network");
+  });
+}
+
 async function sectionXss(): Promise<void> {
   if (DATA_DIR === "") {
     skip("xss", "hostile rows render as text", "set E2E_DATA_DIR to the server's DATA_DIR to run this section");
@@ -1107,6 +1154,7 @@ async function main(): Promise<number> {
     if (run("keyboard")) await sectionKeyboard(page);
     if (run("unhappy")) await sectionUnhappy();
     if (run("xss")) await sectionXss();
+    if (run("review")) await sectionReview(page); // last: it changes the counts the sections above assert
     await ctx.close();
   } finally {
     await browser.close();

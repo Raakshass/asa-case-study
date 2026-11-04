@@ -127,6 +127,8 @@ const fileRoute = load<typeof import("../src/app/api/files/[hash]/route")>("src/
 const samplesRoute = load<typeof import("../src/app/api/samples/route")>("src/app/api/samples/route");
 const masterRoute = load<typeof import("../src/app/api/master/route")>("src/app/api/master/route");
 const resetRoute = load<typeof import("../src/app/api/reset/route")>("src/app/api/reset/route");
+const reviewRoute = load<typeof import("../src/app/api/runs/[id]/review/route")>("src/app/api/runs/[id]/review/route");
+const reviewMod = load<typeof import("../src/lib/review")>("src/lib/review");
 
 const { createRun, enqueue, whenIdle, runPipeline, runExclusive } = pipeline;
 const { sha256 } = pdfMod;
@@ -316,6 +318,9 @@ const RunDetailSchema = z.strictObject({
   finished_at: z.string().nullable(),
   is_history: z.boolean(),
   steps: z.array(StepViewSchema),
+  review: z
+    .strictObject({ action: z.enum(["APPROVE", "REJECT"]), comment: z.string(), po_number: z.string().nullable(), previous_decision: DecisionSchema, created_at: z.string() })
+    .nullable(),
 });
 const RunListItemSchema = z.strictObject({
   id: z.uuid(),
@@ -331,6 +336,7 @@ const RunListItemSchema = z.strictObject({
   first_reason: z.string().nullable(),
   cost_usd: z.number().nullable(),
   is_history: z.boolean(),
+  reviewed: z.enum(["APPROVE", "REJECT"]).nullable(),
 });
 const KpisSchema = z.strictObject({
   total: z.number().int(),
@@ -2456,6 +2462,222 @@ async function resetGroup(t: Check): Promise<void> {
  * Group: startup
  * ============================================================================================== */
 
+/* ================================================================================================
+ * Group: review (B4: a person resolves a hold)
+ * ============================================================================================== */
+
+const postReview = (id: string, body: unknown, token: string | null = RESET_TOKEN, ip = freshIp()) =>
+  new Request(`${ORIGIN}/api/runs/${id}/review`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-forwarded-for": ip, ...(token === null ? {} : { "x-reset-token": token }) },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
+const GOOD_COMMENT = "Confirmed with the buyer by phone.";
+const ReviewSavedSchema = z.strictObject({
+  ok: z.literal(true),
+  review: z.strictObject({ action: z.enum(["APPROVE", "REJECT"]), comment: z.string(), po_number: z.string().nullable(), previous_decision: DecisionSchema, created_at: z.string() }),
+});
+
+/** A valid one-page PDF with no text; the width makes its bytes (and so its hash) its own. */
+async function blankPdf(width: number): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  doc.addPage([width, 842]);
+  return await doc.save({ useObjectStreams: false });
+}
+
+async function reviewGroup(t: Check): Promise<void> {
+  const db = getDb();
+  limiter.resetRateLimits();
+  limiter.resetWriteLimits();
+  await resetViaRoute(t);
+  const detailOf = async (id: string) => parsed(t, RunDetailSchema, await (await runRoute.GET(get(`/api/runs/${id}`), idContext(id))).json(), "run detail");
+  const listOf = async () => parsed(t, RunsListSchema, await (await load<typeof import("../src/app/api/runs/route")>("src/app/api/runs/route").GET(get("/api/runs?limit=200"))).json(), "runs list");
+  const poRemaining = async (po: string): Promise<number | undefined> => {
+    const m = parsed(t, MasterSchema, await (await masterRoute.GET()).json(), "master");
+    return m.purchase_orders.find((p) => p.po_number === po)?.remaining;
+  };
+
+  await t.test("B4: sample 5 (a held, inferred PO) is approved after review: the run keeps the machine's HOLD, the invoice takes the review, the PO balance and the list follow", async () => {
+    const id = await runSampleViaRoute(t, "05-scanned-no-po.pdf");
+    const before = await listOf();
+    const remainingBefore = await poRemaining("PO-1005");
+    const res = await reviewRoute.POST(postReview(id, { action: "APPROVE", comment: GOOD_COMMENT, po_number: "PO-1005" }), idContext(id));
+    t.eq(res.status, 200, "approved");
+    const saved = parsed(t, ReviewSavedSchema, await res.json(), "review response");
+    t.eq([saved.review.action, saved.review.po_number, saved.review.previous_decision], ["APPROVE", "PO-1005", "HOLD"]);
+    const detail = await detailOf(id);
+    t.eq(detail.decision, "HOLD", "runs stays append-only: what the machine decided");
+    t.eq([detail.review?.action, detail.review?.comment], ["APPROVE", GOOD_COMMENT]);
+    t.eq(db.prepare("SELECT decision, po_number, po_inferred FROM invoices WHERE id = ?").get(id), { decision: "APPROVE", po_number: "PO-1005", po_inferred: 0 }, "the invoice is the current state");
+    t.eq(remainingBefore, 3000, "nothing was approved on PO-1005 before the review");
+    t.eq(await poRemaining("PO-1005"), 1500, "PO-1005: 3000 minus the 1500 subtotal");
+    const after = await listOf();
+    const item = after.runs.find((r) => r.id === id);
+    t.eq([item?.decision, item?.reviewed], ["APPROVE", "APPROVE"], "the list shows the effective decision");
+    t.eq([after.kpis.approved - before.kpis.approved, after.kpis.hold - before.kpis.hold], [1, -1], "the KPIs count the effective decision");
+    t.eq(after.kpis.approved_value - before.kpis.approved_value, 1650, "the approved value follows the review");
+    const filtered = parsed(t, RunsListSchema, await (await load<typeof import("../src/app/api/runs/route")>("src/app/api/runs/route").GET(get("/api/runs?decision=HOLD&limit=200"))).json(), "filtered list");
+    t.ok(!filtered.runs.some((r) => r.id === id), "the HOLD filter no longer lists it");
+    const again = await reviewRoute.POST(postReview(id, { action: "REJECT", comment: GOOD_COMMENT }), idContext(id));
+    t.eq(again.status, 409, "one review per run");
+    t.eq((await expectError(t, again, 409, "second review")).error, "This run has already been reviewed.");
+  });
+
+  await t.test("B4: no token, a wrong token, or a bad id or body is refused with a fixed sentence", async () => {
+    const id = await runSampleViaRoute(t, "10-not-an-invoice.pdf");
+    for (const [what, token] of [["no token", null], ["wrong token", "x".repeat(RESET_TOKEN.length)], ["a prefix", RESET_TOKEN.slice(0, 10)]] as const) {
+      const body = await expectError(t, await reviewRoute.POST(postReview(id, { action: "REJECT", comment: GOOD_COMMENT }, token), idContext(id)), 403, what);
+      t.eq(body.error, "Review is not allowed. Enter the operator token.", what);
+      t.ok(!JSON.stringify(body).includes(RESET_TOKEN), `${what}: the token is not echoed`);
+    }
+    t.eq((await detailOf(id)).review, null, "nothing was saved");
+    t.eq((await expectError(t, await reviewRoute.POST(postReview("not-a-uuid", { action: "REJECT", comment: GOOD_COMMENT }), idContext("not-a-uuid")), 400, "bad id")).error, "Invalid run id.");
+    t.eq((await expectError(t, await reviewRoute.POST(postReview(id, "{nope"), idContext(id)), 400, "not json")).error, "Send {action, comment} as JSON.");
+    t.eq((await expectError(t, await reviewRoute.POST(postReview(id, { action: "MAYBE", comment: GOOD_COMMENT }), idContext(id)), 400, "bad action")).error, "Send {action, comment} as JSON.");
+    t.eq((await expectError(t, await reviewRoute.POST(postReview(crypto.randomUUID(), { action: "REJECT", comment: GOOD_COMMENT }), idContext(crypto.randomUUID())), 404, "unknown run")).error, "Run not found.");
+    const tooShort = await expectError(t, await reviewRoute.POST(postReview(id, { action: "REJECT", comment: "too short" }), idContext(id)), 400, "9 characters");
+    t.eq(tooShort.error, "Write a comment of 10 to 500 characters that says what was checked.");
+    t.eq((await expectError(t, await reviewRoute.POST(postReview(id, { action: "REJECT", comment: "x".repeat(501) }), idContext(id)), 400, "501 characters")).error, tooShort.error, "501 characters is too long");
+    const ok = await reviewRoute.POST(postReview(id, { action: "REJECT", comment: "Not an invoice: a delivery note, returned to the sender." }), idContext(id));
+    t.eq(ok.status, 200, "a REJECT needs no PO and no prefix");
+    t.eq((await detailOf(id)).review?.action, "REJECT");
+  });
+
+  await t.test("B4: only a finished HOLD can be reviewed (samples 1 and 4 are 409); sample 3 cannot be approved over its PO balance", async () => {
+    const one = await runSampleViaRoute(t, "01-happy-northwind.pdf");
+    const four = await runSampleViaRoute(t, "04-disguised-duplicate.pdf");
+    for (const id of [one, four]) {
+      const body = await expectError(t, await reviewRoute.POST(postReview(id, { action: "APPROVE", comment: GOOD_COMMENT }), idContext(id)), 409, "not a hold");
+      t.eq(body.error, "Only a finished run that is on hold can be reviewed.");
+    }
+    const three = await runSampleViaRoute(t, "03-split-po-overbill.pdf");
+    const over = await expectError(t, await reviewRoute.POST(postReview(three, { action: "APPROVE", comment: GOOD_COMMENT, po_number: "PO-1003" }), idContext(three)), 409, "over balance");
+    t.includes(over.error, "would exceed");
+    t.includes(over.error, "PO-1003");
+    t.eq((await detailOf(three)).review, null, "nothing was saved");
+    t.eq(db.prepare("SELECT decision FROM invoices WHERE id = ?").pluck().get(three), "HOLD");
+  });
+
+  await t.test("B4: a security-flagged hold is approved only with the \"Security review:\" prefix; a bank change only with \"Bank verified:\"", async () => {
+    const nine = await runSampleViaRoute(t, "09-prompt-injection.pdf");
+    const refused = await expectError(t, await reviewRoute.POST(postReview(nine, { action: "APPROVE", comment: GOOD_COMMENT, po_number: "PO-1003" }), idContext(nine)), 400, "no prefix");
+    t.includes(refused.error, "Security review:");
+    const approvedNine = await reviewRoute.POST(postReview(nine, { action: "APPROVE", comment: "Security review: false positive, verified with Globex.", po_number: "PO-1003" }), idContext(nine));
+    t.eq(approvedNine.status, 200, "with the prefix");
+    const six = await runSampleViaRoute(t, "06-bank-change.pdf");
+    const noPrefix = await expectError(t, await reviewRoute.POST(postReview(six, { action: "APPROVE", comment: "Called the vendor, all fine." }), idContext(six)), 400, "bank, no prefix");
+    t.includes(noPrefix.error, "Bank verified:");
+    const withPrefix = await reviewRoute.POST(postReview(six, { action: "APPROVE", comment: "Bank verified: called the number on file, the new account is genuine." }), idContext(six));
+    t.eq(withPrefix.status, 200, "with the prefix");
+  });
+
+  await t.test("B4: a REJECT is accepted without any prefix, even on a flagged or bank-changed hold", async () => {
+    const rig = makeRig();
+    const id = rig.run(sampleBytes("06-bank-change.pdf"));
+    await enqueue(id, rig.deps());
+    const out = reviewMod.reviewRun(rig.db, id, { action: "REJECT", comment: "The new bank details could not be verified." }, FIXED_NOW);
+    t.eq(out.ok, true);
+    t.eq(rig.db.prepare("SELECT decision FROM invoices WHERE id = ?").pluck().get(id), "REJECT");
+    t.eq(rig.db.prepare("SELECT created_at FROM run_reviews WHERE run_id = ?").pluck().get(id), FIXED_NOW.toISOString(), "the injected clock is used");
+  });
+
+  await t.test("B4: after a REJECT review, the same invoice number in a new file is no longer a hard duplicate (unreviewed, it is)", async () => {
+    const stub: ExtractFn = (_pdf, opts) => mockExtract(sampleBytes("05-scanned-no-po.pdf"), opts); // sample 5's truth: vendor Initech, IF-2210
+    const duplicateOf = (rig: Rig, id: string) => {
+      const step = stepRows(rig.db, id).find((s) => s.key === "duplicate");
+      return [step?.status, step?.severity ?? null];
+    };
+    // control: the first run stays HOLD, so the corrected copy is a hard duplicate
+    const control = makeRig();
+    const first = control.run(sampleBytes("05-scanned-no-po.pdf"));
+    await enqueue(first, control.deps());
+    t.eq(runRow(control.db, first).decision, "HOLD");
+    const copy = control.run(await blankPdf(500));
+    await enqueue(copy, control.deps({ extract: stub }));
+    t.eq(duplicateOf(control, copy), ["fail", "reject"], "unreviewed hold: a hard duplicate");
+    // reviewed as REJECT: the duplicate check ignores the rejected row
+    const rig = makeRig();
+    const held = rig.run(sampleBytes("05-scanned-no-po.pdf"));
+    await enqueue(held, rig.deps());
+    t.eq(reviewMod.reviewRun(rig.db, held, { action: "REJECT", comment: "Wrong PO on the invoice, a corrected copy is coming." }, FIXED_NOW).ok, true);
+    const next = rig.run(await blankPdf(500));
+    await enqueue(next, rig.deps({ extract: stub }));
+    const [status, severity] = duplicateOf(rig, next);
+    t.ok(!(status === "fail" && severity === "reject"), `the duplicate step is ${String(status)}/${String(severity)}, not a hard reject`);
+  });
+
+  await t.test("B4: a 'multiple documents' hold is resolved by a REJECT review, then the first invoice alone is not a duplicate of it", async () => {
+    // Driven with a stub extractor (the mock cannot recognise these PDFs): sample 1's extraction, flagged the first time only.
+    let calls = 0;
+    const stub: ExtractFn = async (_pdf, opts) => {
+      const ex = await mockExtract(sampleBytes("01-happy-northwind.pdf"), opts);
+      calls++;
+      return ex.ok ? { ...ex, data: { ...ex.data, document_signals: { ...ex.data.document_signals, multiple_documents: calls === 1 } } } : ex;
+    };
+    const rig = makeRig();
+    const both = rig.run(await blankPdf(510));
+    await enqueue(both, rig.deps({ extract: stub }));
+    t.eq(runRow(rig.db, both).decision, "HOLD", "flagged as more than one document");
+    t.eq(reviewMod.reviewRun(rig.db, both, { action: "REJECT", comment: "Two invoices in one file; each will be uploaded alone." }, FIXED_NOW).ok, true);
+    const alone = rig.run(await blankPdf(520));
+    await enqueue(alone, rig.deps({ extract: stub }));
+    const dup = stepRows(rig.db, alone).find((s) => s.key === "duplicate");
+    t.ok(!(dup?.status === "fail" && dup.severity === "reject"), "not a hard duplicate: the rejected row is ignored");
+    t.eq(runRow(rig.db, alone).decision, "APPROVE", "the first invoice on its own is approved");
+  });
+
+  await t.test("B4: a near-miss vendor hold cannot be approved (the vendor is not resolved), but can be rejected", async () => {
+    const stub: ExtractFn = async (_pdf, opts) => {
+      const ex = await mockExtract(sampleBytes("01-happy-northwind.pdf"), opts);
+      return ex.ok ? { ...ex, data: { ...ex.data, vendor_name: "Northwind IT Solutons LLC" } } : ex;
+    };
+    const rig = makeRig();
+    const id = rig.run(await blankPdf(530));
+    await enqueue(id, rig.deps({ extract: stub }));
+    t.eq([runRow(rig.db, id).decision, rig.db.prepare("SELECT vendor_id FROM invoices WHERE id = ?").pluck().get(id)], ["HOLD", null], "a near miss holds with no vendor");
+    const approve = reviewMod.reviewRun(rig.db, id, { action: "APPROVE", comment: GOOD_COMMENT, po_number: "PO-1002" }, FIXED_NOW);
+    t.eq(approve.ok, false);
+    if (!approve.ok) t.eq([approve.status, approve.error.startsWith("The vendor is not resolved")], [409, true]);
+    t.eq(reviewMod.reviewRun(rig.db, id, { action: "REJECT", comment: "The vendor is Northwind, ask for a corrected invoice." }, FIXED_NOW).ok, true);
+  });
+
+  await t.test("B4: the PO must be an open PO of this vendor; an inferred PO has to be chosen", async () => {
+    const rig = makeRig();
+    const id = rig.run(sampleBytes("05-scanned-no-po.pdf"));
+    await enqueue(id, rig.deps());
+    const attempt = (po: string | null) => reviewMod.reviewRun(rig.db, id, { action: "APPROVE", comment: GOOD_COMMENT, po_number: po }, FIXED_NOW);
+    const none = attempt(null);
+    t.eq(none.ok === false && [none.status, none.error], [400, "Choose the PO this invoice bills against."], "an inferred PO is not taken for granted");
+    const other = attempt("PO-1003");
+    t.eq(other.ok === false && [other.status, other.error], [409, "That PO is not an open PO of this vendor."], "another vendor's PO");
+    const missing = attempt("PO-9999");
+    t.eq(missing.ok === false && missing.status, 409, "an unknown PO");
+    t.eq(attempt(" po 1005 ").ok, true, "PO numbers compare the way the pipeline compares them");
+    t.eq(rig.db.prepare("SELECT po_number FROM invoices WHERE id = ?").pluck().get(id), "PO-1005", "the stored PO is the canonical number");
+  });
+
+  await t.test("B4: a reset wipes the reviews", async () => {
+    t.ok(countOf(db, "run_reviews") > 0, "there are reviews to wipe");
+    await resetViaRoute(t);
+    t.eq(countOf(db, "run_reviews"), 0);
+  });
+
+  await t.test("B4: review writes have their own limit (30 a minute per address): the 31st is 429, another address and the run quota are untouched", async () => {
+    limiter.resetWriteLimits();
+    limiter.resetRateLimits();
+    const ghost = crypto.randomUUID();
+    const ip = freshIp();
+    for (let i = 0; i < 30; i++) t.eq((await reviewRoute.POST(postReview(ghost, { action: "REJECT", comment: GOOD_COMMENT }, RESET_TOKEN, ip), idContext(ghost))).status, 404, `write ${i + 1}`);
+    const refused = await expectError(t, await reviewRoute.POST(postReview(ghost, { action: "REJECT", comment: GOOD_COMMENT }, RESET_TOKEN, ip), idContext(ghost)), 429, "the 31st");
+    t.includes(refused.error, "Too many changes from your address.");
+    t.ok(refused.retryAfterSec !== undefined && refused.retryAfterSec >= 1, "Retry-After is given");
+    t.eq((await reviewRoute.POST(postReview(ghost, { action: "REJECT", comment: GOOD_COMMENT }, RESET_TOKEN, freshIp()), idContext(ghost))).status, 404, "another address is not affected");
+    t.eq(limiter.checkRateLimit(ip, Date.now()).ok, true, "the run quota is a different window");
+    limiter.resetWriteLimits();
+    limiter.resetRateLimits();
+  });
+}
+
 async function startupGroup(t: Check): Promise<void> {
   const Mod = instrumentation;
 
@@ -2556,6 +2778,7 @@ async function main(): Promise<number> {
     await harness.group("ratelimit", (t) => ratelimitGroup(guarded(t)));
     await harness.group("routes", (t) => routesGroup(guarded(t)));
     await harness.group("reset", (t) => resetGroup(guarded(t)));
+    await harness.group("review", (t) => reviewGroup(guarded(t)));
     await harness.group("startup", (t) => startupGroup(guarded(t)));
     releaseGates();
     let drainTimer: NodeJS.Timeout | undefined;

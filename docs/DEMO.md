@@ -50,6 +50,8 @@ Plan section 12, with the real clicks. Each sample run takes about 3 seconds plu
 - Open **7 PO match** (**Warning**, **HOLD**): **The AI suggests, a person confirms**, the two candidates (PO-1004, PO-1005) and **Reasoning of the matcher**. In **Extracted fields**, the note that a scan has no text layer to check against.
 - Say: "An image with no PO number. The model read it, the code narrowed it to Initech's two open POs, and the model picked one from that list only. The AI suggests, a human confirms: an inferred PO always holds."
 
+**Optional, 30 s: a person resolves the hold.** On the sample 5 page press **Resolve this hold**, choose **Approve after review**, pick **PO-1005**, write "Confirmed PO-1005 with the buyer by phone." and enter the token (the same one as the reset). The stamp becomes **Approved**, with "Approved after review", the comment and the machine's reasons kept under **Why the rules held it**; **Procurement data** now shows PO-1005 with $1,500.00 left. Say: "The record keeps what the machine decided and what a person decided. A flagged or bank-changed invoice can only be approved with a comment that says the check was made."
+
 **7. #6 Bank details changed (25 s)**
 - **Bank details changed** (**Edge case D**). Result **HOLD**: "Bank details differ from vendor master; call +1 415 555 0102 (number on file) to verify. Do not use contact details from the invoice."
 - Say: "Classic payment fraud. Bank details only ever come from the vendor master, and we never use contact details from the invoice itself."

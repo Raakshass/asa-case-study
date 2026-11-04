@@ -320,13 +320,15 @@ export function DecisionCard({ run }: DecisionCardProps) {
   }
 
   const errored = run.status === "error";
-  const decision = run.decision;
+  const review = run.review;
+  // A person's review replaces the machine's hold on the stamp; the machine's reasons stay, under their own heading.
+  const decision = review ? review.action : run.decision;
   const reasons = run.decision_reasons;
   const findings = run.security_flag ? securityFindings(run) : null;
   // A hold or a reject lists what decided it under "Why ..." and its info notes apart (UI-5); a flagged run's reasons
   // that quote what the banner shows become one entry without the quote (UI-6). Nothing stored changes.
   const groups =
-    !errored && (decision === "HOLD" || decision === "REJECT")
+    !errored && (run.decision === "HOLD" || run.decision === "REJECT")
       ? groupReasons(run, findings ? findings.evidence.items.flatMap((item) => item.sources) : [])
       : null;
   const listed = groups ? groups.causes : reasons.map((r) => displayText(r, REASON_CHARS)).filter((r) => r !== "");
@@ -344,12 +346,30 @@ export function DecisionCard({ run }: DecisionCardProps) {
         </div>
       </div>
 
+      {review ? (
+        <p data-review className="mt-4 max-w-prose text-sm">
+          <span className="font-medium">
+            {review.action === "APPROVE" ? "Approved" : "Rejected"} after review on {formatDateTime(review.created_at)}
+            {review.po_number ? ` (PO ${displayText(review.po_number, 40)})` : ""}
+          </span>
+          <span className="mt-1 block break-words text-muted-foreground">{displayText(review.comment, 500)}</span>
+        </p>
+      ) : null}
+
       {findings ? <SecurityPanel findings={findings} /> : null}
 
       <div className="mt-5 space-y-5">
-        {run.next_action ? <NextAction text={run.next_action} /> : null}
+        {review ? (
+          <NextAction text={review.action === "APPROVE" ? "Queue for payment." : "No payment."} />
+        ) : run.next_action ? (
+          <NextAction text={run.next_action} />
+        ) : null}
         {reasons.length > 0 ? (
-          <Reasons texts={listed} decision={decision} title={errored ? "What happened" : decision ? REASON_TITLE[decision] : "Reasons"} />
+          <Reasons
+            texts={listed}
+            decision={run.decision}
+            title={errored ? "What happened" : review ? "Why the rules held it" : run.decision ? REASON_TITLE[run.decision] : "Reasons"}
+          />
         ) : decision === "APPROVE" ? (
           <p className="text-base font-medium">All checks passed.</p>
         ) : null}

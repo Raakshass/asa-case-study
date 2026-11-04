@@ -2,7 +2,8 @@
  * Shared helpers of the route handlers (Phase 5). Not a route: the underscore keeps this folder out of routing.
  * Server-only. Everything a request carries (headers, body, file names) is untrusted.
  */
-import { CONFIG } from "@/lib/config";
+import crypto from "node:crypto";
+import { CONFIG, ENV } from "@/lib/config";
 import type { ApiError } from "@/lib/types";
 
 /** Every JSON response: never cached, whatever sits in front of the app. */
@@ -29,6 +30,21 @@ function errorLabel(e: unknown): string {
 export function serverError(route: string, e: unknown): Response {
   console.error(JSON.stringify({ route, event: "unhandled_error", error: errorLabel(e) }));
   return apiError(500, "Something went wrong.");
+}
+
+const sha256Digest = (value: string): Buffer => crypto.createHash("sha256").update(value).digest();
+
+/**
+ * True when the x-reset-token header equals the operator token (DEMO_RESET_TOKEN, at least 16 characters). Reset, hold
+ * review and automations all use this one check. timingSafeEqual throws on buffers of different lengths, so both sides
+ * are hashed first: two 32-byte digests always compare, whatever the header holds, and the time does not depend on how
+ * long the matching prefix is. The compare runs even when no token is configured, so that case looks like a wrong one.
+ */
+export function tokenMatches(req: Request): boolean {
+  const expected = ENV.demoResetToken; // null when unset or shorter than 16 characters
+  const supplied = req.headers.get("x-reset-token") ?? "";
+  const same = crypto.timingSafeEqual(sha256Digest(supplied), sha256Digest(expected ?? ""));
+  return expected !== null && same;
 }
 
 const MAX_IP_CHARS = 64;

@@ -18,7 +18,9 @@ import {
   type Decision,
   type MasterResponse,
   type ResetResponse,
+  type ReviewRequest,
   type RunDetail,
+  type RunReview,
   type RunsListResponse,
   type SampleListItem,
 } from "@/lib/types";
@@ -230,6 +232,29 @@ export async function resetDemo(token: string, signal?: AbortSignal): Promise<Ap
     signal,
     timeoutMs: RESET_TIMEOUT_MS,
     guard: isReset,
+  });
+}
+
+const isReviewSaved = (v: unknown): v is { ok: true; review: RunReview } => isRecord(v) && v.ok === true && isRecord(v.review);
+
+/** POST /api/runs/:id/review with the operator token: a person approves or rejects a held run (review round B4). */
+export async function reviewRun(id: string, body: ReviewRequest, token: string, signal?: AbortSignal): Promise<ApiResult<{ ok: true; review: RunReview }>> {
+  const trimmed = token.trim();
+  if (!trimmed) return fail(0, "Enter the operator token.");
+  if (!/^[\x20-\x7e]+$/.test(trimmed)) return fail(0, "The operator token contains characters that cannot be sent.");
+  let segment: string;
+  try {
+    segment = encodeURIComponent(id);
+  } catch {
+    return fail(400, "That is not a valid run id.");
+  }
+  return request(`/api/runs/${segment}/review`, {
+    method: "POST",
+    headers: { "x-reset-token": trimmed, "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+    timeoutMs: GET_TIMEOUT_MS,
+    guard: isReviewSaved,
   });
 }
 

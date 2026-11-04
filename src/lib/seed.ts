@@ -197,7 +197,7 @@ export function seedFromData(db: DB, data: SeedData): SeedCounts {
   const { vendors, purchaseOrders, history } = parsed.data;
 
   const run = db.transaction((): SeedCounts => {
-    db.exec("DELETE FROM run_steps; DELETE FROM runs; DELETE FROM invoices; DELETE FROM purchase_orders; DELETE FROM vendors;");
+    db.exec("DELETE FROM run_reviews; DELETE FROM run_steps; DELETE FROM runs; DELETE FROM invoices; DELETE FROM purchase_orders; DELETE FROM vendors;");
     const insVendor = db.prepare(
       "INSERT INTO vendors (id, name, aliases, approved, bank_account, phone_on_file) VALUES (?, ?, ?, ?, ?, ?)",
     );

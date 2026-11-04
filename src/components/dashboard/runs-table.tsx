@@ -93,6 +93,7 @@ function RunRow({ run }: { run: RunListItem }) {
           {/* Below 1024 px the Decision column is off the edge of the table's scroll frame: show the decision here too (UI-1). */}
           <div data-decision-inline="true" className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 lg:hidden">
             <DecisionBadge decision={run.decision} runStatus={run.status} size="sm" />
+            {run.reviewed ? <span className="text-sm text-muted-foreground">reviewed</span> : null}
             {run.security_flag ? <SecurityBadge size="sm" /> : null}
           </div>
         </div>
@@ -112,6 +113,7 @@ function RunRow({ run }: { run: RunListItem }) {
       <TableCell className="px-3 py-3">
         <div className="flex max-w-[10rem] flex-wrap items-center gap-x-3 gap-y-1">
           <DecisionBadge decision={run.decision} runStatus={run.status} size="sm" />
+          {run.reviewed ? <span className="text-sm text-muted-foreground">reviewed</span> : null}
           {run.security_flag ? <SecurityBadge size="sm" /> : null}
         </div>
       </TableCell>

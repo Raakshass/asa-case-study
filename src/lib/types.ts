@@ -786,6 +786,26 @@ export interface StepView {
   finished_at: string | null;
 }
 
+/* ---- human review of a hold (review round B4; docs/CONTRACT_CHANGES.md) ---- */
+
+export type ReviewAction = "APPROVE" | "REJECT";
+export interface RunReview {
+  action: ReviewAction;
+  comment: string;
+  po_number: string | null;
+  previous_decision: Decision;
+  created_at: string;
+}
+export interface ReviewRequest {
+  action: ReviewAction;
+  comment: string;
+  po_number?: string | null;
+}
+/** An approval of a security-flagged hold must say so in its comment, so the record carries the check. */
+export const SECURITY_REVIEW_PREFIX = "Security review:";
+/** An approval of an invoice with new or different bank details must say the vendor was called. */
+export const BANK_REVIEW_PREFIX = "Bank verified:";
+
 /** GET /api/runs/:id -> 200 */
 export interface RunDetail {
   id: string;
@@ -806,6 +826,8 @@ export interface RunDetail {
   is_history: boolean;
   /** ordered by idx; empty for history runs */
   steps: StepView[];
+  /** what a person decided about a held run (review round B4); null when nobody has */
+  review: RunReview | null;
 }
 
 /** One dashboard row (GET /api/runs). vendor/invoice/total come from the invoices row, else the extraction. */
@@ -824,6 +846,8 @@ export interface RunListItem {
   first_reason: string | null;
   cost_usd: number | null;
   is_history: boolean;
+  /** what a person decided about this run, when someone did; `decision` is then the effective decision (the review's) */
+  reviewed: ReviewAction | null;
 }
 
 /** Computed over all runs, not just the returned page. approved_value = sum of `total` of APPROVE runs (USD). */

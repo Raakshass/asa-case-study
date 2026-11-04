@@ -4,37 +4,11 @@ import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { CircleCheck, Clock, LoaderCircle, RotateCcw } from "lucide-react";
 import { resetDemo } from "@/components/shared/api";
 import { ErrorState } from "@/components/shared/error-state";
+import { forgetToken, readSavedToken, saveToken } from "@/components/shared/operator-token";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { SeedCounts } from "@/lib/types";
 import { describeCounts, resetOutcomeOf } from "./upload-rules";
-
-/** The token lives in sessionStorage for this tab only (plan section 6.8), so a second reset does not ask again. */
-const TOKEN_KEY = "invoice-ap:reset-token";
-
-function readSavedToken(): string {
-  try {
-    return window.sessionStorage.getItem(TOKEN_KEY) ?? "";
-  } catch {
-    return ""; // storage blocked (private window, site data off): the form simply starts empty
-  }
-}
-
-function saveToken(token: string): void {
-  try {
-    window.sessionStorage.setItem(TOKEN_KEY, token);
-  } catch {
-    // storage blocked: nothing to remember, nothing lost
-  }
-}
-
-function forgetToken(): void {
-  try {
-    window.sessionStorage.removeItem(TOKEN_KEY);
-  } catch {
-    // storage blocked: nothing was saved
-  }
-}
 
 type Outcome = { kind: "done"; counts: SeedCounts } | { kind: "failed"; message: string } | { kind: "pending"; message: string };
 
