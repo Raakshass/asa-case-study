@@ -142,6 +142,13 @@ const samplesRoute = load<typeof import("../src/app/api/samples/route")>("src/ap
 const masterRoute = load<typeof import("../src/app/api/master/route")>("src/app/api/master/route");
 const resetRoute = load<typeof import("../src/app/api/reset/route")>("src/app/api/reset/route");
 const reviewRoute = load<typeof import("../src/app/api/runs/[id]/review/route")>("src/app/api/runs/[id]/review/route");
+const automationsRoute = load<typeof import("../src/app/api/automations/route")>("src/app/api/automations/route");
+const automationRoute = load<typeof import("../src/app/api/automations/[id]/route")>("src/app/api/automations/[id]/route");
+const enabledRoute = load<typeof import("../src/app/api/automations/[id]/enabled/route")>("src/app/api/automations/[id]/enabled/route");
+const testRoute = load<typeof import("../src/app/api/automations/[id]/test/route")>("src/app/api/automations/[id]/test/route");
+const executionsRoute = load<typeof import("../src/app/api/automations/[id]/executions/route")>("src/app/api/automations/[id]/executions/route");
+const executionRoute = load<typeof import("../src/app/api/automations/executions/[executionId]/route")>("src/app/api/automations/executions/[executionId]/route");
+const runAutomationsRoute = load<typeof import("../src/app/api/runs/[id]/automations/route")>("src/app/api/runs/[id]/automations/route");
 const reviewMod = load<typeof import("../src/lib/review")>("src/lib/review");
 
 const { createRun, enqueue, whenIdle, runPipeline, runExclusive } = pipeline;
@@ -2789,7 +2796,8 @@ async function automationsGroup(t: Check): Promise<void> {
       await automationsIdle();
       const runs = rig.db.prepare("SELECT file_name, status, decision, decision_reasons, next_action, security_flag FROM runs WHERE model IS NOT 'history' ORDER BY file_name").all();
       const invoices = (rig.db.prepare("SELECT r.file_name AS file_name, i.* FROM invoices i JOIN runs r ON r.id = i.id WHERE r.model IS NOT 'history' ORDER BY r.file_name").all() as Record<string, unknown>[]).map((row) => {
-        const { id: _id, run_id: _runId, created_at: _created, ...rest } = row;
+        const rest = { ...row };
+        for (const key of ["id", "run_id", "created_at"]) delete rest[key]; // random ids and the clock are not part of what was decided
         return rest;
       });
       const snap = loadSnapshot(rig.db);
@@ -2835,6 +2843,263 @@ async function automationsGroup(t: Check): Promise<void> {
     t.includes(sent[0].text, "GLX-303, Globex Logistics Ltd, $9,900.00");
     t.includes(sent[0].text, "IF-2210");
     t.eq(tickSchedules(deps), 0, "the same slot is not sent twice");
+  });
+
+  /* ---- A8: the routes ---- */
+
+  const autoReq = (method: string, pathName: string, body?: unknown, token: string | null = RESET_TOKEN, ip = freshIp()) =>
+    new Request(`${ORIGIN}${pathName}`, {
+      method,
+      headers: { "x-forwarded-for": ip, ...(token === null ? {} : { "x-reset-token": token }), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+    });
+  interface Listed { automations: { id: string; name: string; enabled: boolean; seed_key: string | null; trigger_summary: string; problem_count: number; step_count: number; trigger_type: string }[]; sending_enabled: boolean; automations_enabled: boolean }
+  const listAuto = async (): Promise<Listed> => (await automationsRoute.GET()).json() as Promise<Listed>;
+  const seedOf = async (key: string) => (await listAuto()).automations.find((a) => a.seed_key === key) as Listed["automations"][number];
+  interface Detail { id: string; name: string; enabled: boolean; version: number; graph: { nodes: { id: string; type: string; name: string; position: { x: number; y: number }; config: Record<string, unknown> }[]; edges: { id: string; source: string; sourceHandle: string; target: string }[] }; secrets: Record<string, { has_url: boolean; url_hint: string | null; has_signing_secret: boolean }>; problems: { node_id: string | null; message: string }[]; sending_enabled: boolean; allowed_hosts: string[]; review_trigger_available: boolean }
+  const detailOf = async (id: string): Promise<Detail> => (await automationRoute.GET(autoReq("GET", `/api/automations/${id}`), idContext(id))).json() as Promise<Detail>;
+  const put = (id: string, body: unknown, token: string | null = RESET_TOKEN, ip?: string) => automationRoute.PUT(autoReq("PUT", `/api/automations/${id}`, body, token, ip), idContext(id));
+
+  await t.test("A8: GET /api/automations after a reset lists the three seeds, the first on; sending is off without allowed hosts", async () => {
+    await resetViaRoute(t);
+    const res = await automationsRoute.GET();
+    t.eq([res.status, res.headers.get("cache-control")], [200, "no-store"]);
+    const body = (await res.json()) as Listed;
+    t.eq(body.automations.map((a) => [a.seed_key, a.name, a.enabled, a.trigger_type, a.step_count, a.problem_count]), [
+      ["route-holds", "Route holds to the right person", true, "run_finished", 7, 0],
+      ["chat-rejections", "Tell the team about rejections", false, "run_finished", 2, 1],
+      ["daily-holds", "Morning summary of holds", false, "schedule", 4, 1],
+    ], "the chat seeds each lack their URL: one problem");
+    t.eq([body.sending_enabled, body.automations_enabled], [false, true]);
+    t.eq(body.automations[0].trigger_summary, "Only invoices that are on hold");
+    t.eq(body.automations[2].trigger_summary, "Every day at 08:00 UTC");
+  });
+
+  await t.test("A8: every change needs the operator token (403 without one or with a wrong one); reads are open", async () => {
+    const seed = await seedOf("route-holds");
+    const id = seed.id;
+    const other = crypto.randomUUID();
+    const wrong = "x".repeat(RESET_TOKEN.length);
+    for (const token of [null, wrong, RESET_TOKEN.slice(0, 10)]) {
+      const label = token === null ? "no token" : token === wrong ? "wrong token" : "a prefix";
+      for (const [what, res] of [
+        ["POST create", await automationsRoute.POST(autoReq("POST", "/api/automations", { name: "N", start: "blank:run_finished" }, token))],
+        ["PUT", await put(id, { name: "N", graph: { nodes: [], edges: [] }, version: 1 }, token)],
+        ["enabled", await enabledRoute.POST(autoReq("POST", `/api/automations/${id}/enabled`, { enabled: false }, token), idContext(id))],
+        ["DELETE", await automationRoute.DELETE(autoReq("DELETE", `/api/automations/${id}`, undefined, token), idContext(id))],
+        ["test", await testRoute.POST(autoReq("POST", `/api/automations/${id}/test`, { run_id: null, send: false }, token), idContext(id))],
+      ] as const) {
+        const body = await expectError(t, res, 403, `${what}, ${label}`);
+        t.eq(body.error, "Changing automations is not allowed. Enter the operator token.", `${what}, ${label}`);
+        t.ok(!JSON.stringify(body).includes(RESET_TOKEN), "the token is not echoed");
+      }
+    }
+    t.eq((await listAuto()).automations.length, 3, "nothing changed");
+    t.eq((await automationRoute.GET(autoReq("GET", `/api/automations/${id}`), idContext(id))).status, 200, "reading needs no token");
+    t.eq((await automationRoute.GET(autoReq("GET", "/api/automations/x"), idContext("x"))).status, 400);
+    t.eq((await automationRoute.GET(autoReq("GET", `/api/automations/${other}`), idContext(other))).status, 404);
+    t.eq((await expectError(t, await automationRoute.GET(autoReq("GET", `/api/automations/${other}`), idContext(other)), 404, "unknown")).error, "Automation not found.");
+  });
+
+  await t.test("A8: POST creates a copy of a seed or a blank start: off, the same graph, no secrets; bad bodies give the fixed 400", async () => {
+    const seed = await seedOf("route-holds");
+    const res = await automationsRoute.POST(autoReq("POST", "/api/automations", { name: "  Route holds for the Q4 close  ", start: "seed:route-holds" }));
+    t.eq(res.status, 201);
+    const { id } = (await res.json()) as { id: string };
+    const copy = await detailOf(id);
+    const original = await detailOf(seed.id);
+    t.eq([copy.name, copy.enabled, copy.version, copy.graph, copy.secrets], ["Route holds for the Q4 close", false, 1, original.graph, {}]);
+    const blank = await automationsRoute.POST(autoReq("POST", "/api/automations", { name: "Blank", start: "blank:schedule" }));
+    const blankDetail = await detailOf(((await blank.json()) as { id: string }).id);
+    t.eq([blankDetail.graph.nodes.map((n) => n.type), blankDetail.graph.edges, blankDetail.problems.length], [["trigger.schedule"], [], 0]);
+    for (const bad of [{ name: "", start: "blank:schedule" }, { name: "x", start: "seed:nope" }, { name: "x".repeat(61), start: "blank:schedule" }, { start: "blank:schedule" }, "{nope"]) {
+      t.eq((await expectError(t, await automationsRoute.POST(autoReq("POST", "/api/automations", bad)), 400, "bad body")).error, "Send {name, start} as JSON.");
+    }
+    const noJson = await automationsRoute.POST(new Request(`${ORIGIN}/api/automations`, { method: "POST", headers: { "x-reset-token": RESET_TOKEN, "x-forwarded-for": freshIp() }, body: "name=x" }));
+    t.eq((await expectError(t, noJson, 415, "not json")).error, "Send JSON.");
+    await automationRoute.DELETE(autoReq("DELETE", `/api/automations/${id}`), idContext(id));
+  });
+
+  await t.test("A8: PUT needs the current version (409 otherwise) and returns the next one; a cycle saves with its problems and turns an enabled automation off", async () => {
+    const seed = await seedOf("route-holds");
+    const d = await detailOf(seed.id);
+    t.eq(d.enabled, true);
+    const stale = await expectError(t, await put(seed.id, { name: d.name, graph: d.graph, version: d.version + 5 }), 409, "stale version");
+    t.eq(stale.error, "Someone else saved this automation. Reload to see their changes.");
+    const ok = await put(seed.id, { name: "Route holds, renamed", graph: d.graph, version: d.version });
+    t.eq(ok.status, 200);
+    t.eq(await ok.json(), { version: d.version + 1, problems: [], turned_off: false });
+    t.eq((await detailOf(seed.id)).name, "Route holds, renamed");
+    const cyclic = { ...d.graph, edges: [...d.graph.edges, { id: "cycle", source: "assign-lead", sourceHandle: "out", target: "if-large" }] };
+    const saved = await put(seed.id, { name: d.name, graph: cyclic, version: d.version + 1 });
+    t.eq(saved.status, 200);
+    const result = (await saved.json()) as { version: number; problems: { message: string }[]; turned_off: boolean };
+    t.eq([result.version, result.turned_off, result.problems.map((p) => p.message)], [d.version + 2, true, ["The steps go round in a circle; remove one connection."]]);
+    const after = await detailOf(seed.id);
+    t.eq([after.enabled, after.problems.length], [false, 1], "saved, and turned off");
+    const refused = await enabledRoute.POST(autoReq("POST", `/api/automations/${seed.id}/enabled`, { enabled: true }), idContext(seed.id));
+    t.eq(refused.status, 409);
+    const refusedBody = (await refused.json()) as { error: string; problems: { message: string }[] };
+    t.eq([refusedBody.error, refusedBody.problems.length], ["Fix the problems listed before turning this automation on.", 1]);
+    // fix it: back to the seed's graph, turn it on again
+    t.eq((await put(seed.id, { name: d.name, graph: d.graph, version: d.version + 2 })).status, 200);
+    const on = await enabledRoute.POST(autoReq("POST", `/api/automations/${seed.id}/enabled`, { enabled: true }), idContext(seed.id));
+    t.eq([on.status, await on.json()], [200, { enabled: true }]);
+    t.eq((await detailOf(seed.id)).enabled, true);
+    t.eq((await enabledRoute.POST(autoReq("POST", `/api/automations/${seed.id}/enabled`, { enabled: "yes" }), idContext(seed.id))).status, 400);
+    t.eq((await put(seed.id, { name: "", graph: d.graph, version: 1 })).status, 400, "an empty name");
+    t.eq((await expectError(t, await put(seed.id, { name: "x", graph: { nodes: 5 }, version: 1 }), 400, "unreadable graph")).error, "This automation could not be read.");
+    const huge = await automationRoute.PUT(new Request(`${ORIGIN}/api/automations/${seed.id}`, { method: "PUT", headers: { "x-reset-token": RESET_TOKEN, "x-forwarded-for": freshIp(), "content-type": "application/json", "content-length": String(CONFIG.automationGraphMaxBytes + 1) }, body: "{}" }), idContext(seed.id));
+    t.eq((await expectError(t, huge, 413, "too large")).error, "This automation is too large.");
+  });
+
+  await t.test("A8: a webhook URL is stored but never returned: only a hint; a non-https URL is refused; removing the step drops its secret", async () => {
+    const seed = await seedOf("chat-rejections");
+    const d = await detailOf(seed.id);
+    t.eq(d.secrets, { chat: { has_url: false, url_hint: null, has_signing_secret: false } });
+    t.eq(d.problems.map((p) => p.message), ["Add the webhook URL."]);
+    const URL_SECRET = "https://hooks.example.com/T000/B000/abcd";
+    const saved = await put(seed.id, { name: d.name, graph: d.graph, version: d.version, secrets: { chat: { url: URL_SECRET, signing_secret: "s3cret-signing-value" } } });
+    t.eq(saved.status, 200);
+    const savedText = await saved.text();
+    t.ok(!savedText.includes("T000") && !savedText.includes("s3cret"), "the save's own answer repeats nothing");
+    const res = await automationRoute.GET(autoReq("GET", `/api/automations/${seed.id}`), idContext(seed.id));
+    const raw = await res.text();
+    const after = JSON.parse(raw) as Detail;
+    t.eq(after.secrets.chat, { has_url: true, url_hint: "hooks.example.com/…/abcd", has_signing_secret: true });
+    t.eq(after.problems, [], "with a URL set, nothing is missing");
+    for (const piece of ["T000", "B000", "s3cret", URL_SECRET]) t.ok(!raw.includes(piece), `the detail does not contain ${piece}`);
+    const list = await (await automationsRoute.GET()).text();
+    t.ok(!list.includes("T000") && !list.includes("hooks.example.com"), "nor does the list");
+    t.eq(getDb().prepare("SELECT secrets FROM workflows WHERE id = ?").pluck().get(seed.id), JSON.stringify({ chat: { url: URL_SECRET, signing_secret: "s3cret-signing-value" } }), "it is in the secrets column");
+    // an absent key keeps it; null clears one part
+    t.eq((await put(seed.id, { name: d.name, graph: d.graph, version: after.version, secrets: { chat: { signing_secret: null } } })).status, 200);
+    t.eq((await detailOf(seed.id)).secrets.chat, { has_url: true, url_hint: "hooks.example.com/…/abcd", has_signing_secret: false });
+    for (const bad of ["http://x.example", "ftp://x.example/a", "https://", `https://x.example/${"a".repeat(2000)}`, "https://has space.example/a"]) {
+      const v = (await detailOf(seed.id)).version;
+      t.eq((await expectError(t, await put(seed.id, { name: d.name, graph: d.graph, version: v, secrets: { chat: { url: bad } } }), 400, bad.slice(0, 20))).error, "A webhook URL must start with https:// and be at most 2,000 characters.");
+    }
+    // remove the chat step: its secret goes with it
+    const without = { nodes: d.graph.nodes.filter((n) => n.id !== "chat"), edges: [] };
+    t.eq((await put(seed.id, { name: d.name, graph: without, version: (await detailOf(seed.id)).version })).status, 200);
+    t.eq(getDb().prepare("SELECT secrets FROM workflows WHERE id = ?").pluck().get(seed.id), "{}", "the secret of a removed step is dropped");
+    // a URL for a step that never sends is not kept
+    const v2 = (await detailOf(seed.id)).version;
+    t.eq((await put(seed.id, { name: d.name, graph: without, version: v2, secrets: { start: { url: URL_SECRET } } })).status, 200);
+    t.eq(getDb().prepare("SELECT secrets FROM workflows WHERE id = ?").pluck().get(seed.id), "{}");
+  });
+
+  await t.test("A8: samples 3 and 9 are routed through the real routes, and the run's page data shows it; an approved run shows nothing", async () => {
+    await resetViaRoute(t);
+    const three = await runSampleViaRoute(t, "03-split-po-overbill.pdf");
+    const nine = await runSampleViaRoute(t, "09-prompt-injection.pdf");
+    const one = await runSampleViaRoute(t, "01-happy-northwind.pdf");
+    await automationsIdle();
+    const forRun = async (id: string) => (await (await runAutomationsRoute.GET(autoReq("GET", `/api/runs/${id}/automations`), idContext(id))).json()) as {
+      executions: { workflow_name: string; status: string; mode: string; run_label: string | null }[];
+      notes: { text: string; workflow_name: string }[];
+      assignment: { assignee: string; workflow_name: string } | null;
+      pending: number;
+    };
+    const a3 = await forRun(three);
+    t.eq([a3.executions.map((e) => [e.workflow_name, e.status, e.mode]), a3.assignment?.assignee, a3.notes.length, a3.pending], [[["Route holds to the right person", "success", "live"]], "AP lead", 0, 0]);
+    t.includes(a3.executions[0].run_label, "GLX-303");
+    const a9 = await forRun(nine);
+    t.eq([a9.assignment?.assignee, a9.notes.length, a9.pending], ["Finance security", 1, 0]);
+    t.ok(a9.notes[0].text.startsWith("Security review needed before any payment:"));
+    const a1 = await forRun(one);
+    t.eq([a1.executions.length, a1.notes.length, a1.assignment, a1.pending], [0, 0, null, 0]);
+    t.eq((await runAutomationsRoute.GET(autoReq("GET", "/api/runs/x/automations"), idContext("x"))).status, 400);
+    const ghost = crypto.randomUUID();
+    t.eq((await expectError(t, await runAutomationsRoute.GET(autoReq("GET", `/api/runs/${ghost}/automations`), idContext(ghost)), 404, "unknown run")).error, "Run not found.");
+  });
+
+  await t.test("A8: executions of one automation and one execution with its steps and graph snapshot; unknown ids are 404", async () => {
+    const seed = await seedOf("route-holds");
+    const res = await executionsRoute.GET(autoReq("GET", `/api/automations/${seed.id}/executions?limit=1`), idContext(seed.id));
+    t.eq(res.status, 200);
+    const { executions } = (await res.json()) as { executions: { id: string; status: string; trigger_type: string; mode: string }[] };
+    t.eq([executions.length, executions[0].trigger_type, executions[0].mode], [1, "run_finished", "live"], "limit=1, newest first");
+    const all = (await (await executionsRoute.GET(autoReq("GET", `/api/automations/${seed.id}/executions`), idContext(seed.id))).json()) as { executions: unknown[] };
+    t.eq(all.executions.length, 2);
+    const detail = await executionRoute.GET(autoReq("GET", `/api/automations/executions/${executions[0].id}`), idContext("x") as never);
+    t.eq(detail.status, 400, "the context carries executionId, not id");
+    const ok = await executionRoute.GET(autoReq("GET", "/x"), { params: Promise.resolve({ executionId: executions[0].id }) });
+    const body = (await ok.json()) as { workflow_name: string; graph: { nodes: unknown[] }; steps: { node_id: string; status: string; output: unknown }[] };
+    t.eq([ok.status, body.workflow_name, body.graph.nodes.length, body.steps.length], [200, "Route holds to the right person", 7, 7]);
+    t.ok(body.steps.every((s) => ["success", "skipped"].includes(s.status)));
+    const ghost = crypto.randomUUID();
+    t.eq((await executionRoute.GET(autoReq("GET", "/x"), { params: Promise.resolve({ executionId: ghost }) })).status, 404);
+    t.eq((await expectError(t, await executionsRoute.GET(autoReq("GET", "/x"), idContext(ghost)), 404, "unknown automation")).error, "Automation not found.");
+    t.eq((await executionsRoute.GET(autoReq("GET", "/x?limit=9999"), idContext(seed.id))).status, 200, "an out-of-range limit falls back to the default");
+  });
+
+  await t.test("A8: a test through the route runs on a past invoice, writes nothing and shows a preview; its refusals are fixed sentences", async () => {
+    const seed = await seedOf("chat-rejections");
+    const four = await runSampleViaRoute(t, "04-disguised-duplicate.pdf");
+    const res = await testRoute.POST(autoReq("POST", `/api/automations/${seed.id}/test`, { run_id: four, send: false }), idContext(seed.id));
+    t.eq(res.status, 202);
+    const { executionId } = (await res.json()) as { executionId: string };
+    await automationsIdle();
+    const exec = (await (await executionRoute.GET(autoReq("GET", "/x"), { params: Promise.resolve({ executionId }) })).json()) as { status: string; mode: string; steps: { node_id: string; output: { preview?: { host: string | null; body: { text: string } } } }[] };
+    t.eq([exec.status, exec.mode], ["success", "test"]);
+    const preview = exec.steps.find((s) => s.node_id === "chat")?.output.preview;
+    t.eq(preview?.host, null, "no URL yet: the preview says so");
+    t.ok(String(preview?.body.text).startsWith("Rejected: "), preview?.body.text);
+    t.eq(blockedHttps, 0, "nothing was sent");
+    t.eq((await expectError(t, await testRoute.POST(autoReq("POST", `/api/automations/${seed.id}/test`, { run_id: null, send: false }), idContext(seed.id)), 400, "no run")).error, "Choose a finished invoice to test with.");
+    t.eq((await expectError(t, await testRoute.POST(autoReq("POST", `/api/automations/${seed.id}/test`, { send: false }), idContext(seed.id)), 400, "bad body")).error, "Send {run_id, send} as JSON.");
+    const ghost = crypto.randomUUID();
+    t.eq((await expectError(t, await testRoute.POST(autoReq("POST", `/api/automations/${ghost}/test`, { run_id: null, send: false }), idContext(ghost)), 404, "unknown")).error, "Automation not found.");
+    // sending for real with no allowed host: the sender refuses before any lookup (and https.request stays unused)
+    const d = await detailOf(seed.id);
+    t.eq((await put(seed.id, { name: d.name, graph: d.graph, version: d.version, secrets: { chat: { url: "https://hooks.example.com/T000/B000/abcd" } } })).status, 200);
+    const send = await testRoute.POST(autoReq("POST", `/api/automations/${seed.id}/test`, { run_id: four, send: true }), idContext(seed.id));
+    const sendId = ((await send.json()) as { executionId: string }).executionId;
+    await automationsIdle();
+    const sent = (await (await executionRoute.GET(autoReq("GET", "/x"), { params: Promise.resolve({ executionId: sendId }) })).json()) as { status: string; steps: { node_id: string; error: string | null; attempts: number }[] };
+    const step = sent.steps.find((s) => s.node_id === "chat");
+    t.eq([sent.status, step?.error, step?.attempts], ["error", "Sending to other servers is turned off on this server (AUTOMATION_ALLOWED_HOSTS is empty).", 1]);
+    t.eq(blockedHttps, 0, "refused before any connection");
+  });
+
+  await t.test("A8: deleting an automation removes it and its executions; the invoice's notes stay", async () => {
+    const created = await automationsRoute.POST(autoReq("POST", "/api/automations", { name: "Temporary", start: "seed:route-holds" }));
+    const id = ((await created.json()) as { id: string }).id;
+    t.eq((await automationRoute.DELETE(autoReq("DELETE", `/api/automations/${id}`), idContext(id))).status, 200);
+    t.eq((await automationRoute.GET(autoReq("GET", `/api/automations/${id}`), idContext(id))).status, 404);
+    t.eq((await automationRoute.DELETE(autoReq("DELETE", `/api/automations/${id}`), idContext(id))).status, 404, "already gone");
+    t.eq((await automationRoute.DELETE(autoReq("DELETE", "/api/automations/x"), idContext("x"))).status, 400);
+  });
+
+  await t.test("A8: changes have their own limit: the 31st in a minute from one address is 429, another address and the run quota are untouched", async () => {
+    limiter.resetWriteLimits();
+    limiter.resetRateLimits();
+    const ip = freshIp();
+    const ghost = crypto.randomUUID();
+    for (let i = 0; i < 30; i++) t.eq((await automationRoute.DELETE(autoReq("DELETE", `/api/automations/${ghost}`, undefined, RESET_TOKEN, ip), idContext(ghost))).status, 404, `write ${i + 1}`);
+    const refused = await expectError(t, await automationRoute.DELETE(autoReq("DELETE", `/api/automations/${ghost}`, undefined, RESET_TOKEN, ip), idContext(ghost)), 429, "the 31st");
+    t.includes(refused.error, "Too many changes from your address.");
+    t.eq((await automationRoute.DELETE(autoReq("DELETE", `/api/automations/${ghost}`, undefined, RESET_TOKEN, freshIp()), idContext(ghost))).status, 404, "another address");
+    t.eq(limiter.checkRateLimit(ip, Date.now()).ok, true, "runs are a different window");
+    limiter.resetWriteLimits();
+    limiter.resetRateLimits();
+  });
+
+  await t.test("A8: startup recovery on a real database file turns an execution left running into an error", async () => {
+    const file = path.join(TMP, "recovery-automations.db");
+    const first = openDb(file);
+    const stamp = FIXED_NOW.toISOString();
+    first.prepare("INSERT INTO workflows (id, name, enabled, trigger_type, graph, created_at, updated_at) VALUES ('w', 'W', 0, 'run_finished', '{}', ?, ?)").run(stamp, stamp);
+    first.prepare("INSERT INTO workflow_executions (id, workflow_id, workflow_name, workflow_version, graph, trigger_type, trigger_key, mode, status, vars, created_at, started_at) VALUES ('x', 'w', 'W', 1, '{}', 'run_finished', 'run:1', 'live', 'running', '{}', ?, ?)").run(stamp, stamp);
+    first.close();
+    const second = openDb(file, { recover: true });
+    try {
+      const row = second.prepare("SELECT status, error FROM workflow_executions WHERE id = 'x'").get();
+      t.eq(row, { status: "error", error: "Interrupted by restart." });
+    } finally {
+      second.close();
+    }
   });
 
   await t.test("a reset through the route removes executions, notes and assignments, and brings the seeds back", async () => {

@@ -14,6 +14,12 @@
  */
 import {
   SHA256_HEX_RE,
+  type AutomationDetail,
+  type AutomationsListResponse,
+  type ExecutionDetail,
+  type ExecutionListItem,
+  type RunAutomationsResponse,
+  type SaveAutomationResponse,
   type CreateRunResponse,
   type Decision,
   type MasterResponse,
@@ -125,7 +131,7 @@ function withTimeout(external: AbortSignal | undefined, ms: number) {
 }
 
 interface RequestSpec<T> {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   headers?: Record<string, string>;
   body?: BodyInit;
   signal?: AbortSignal;
@@ -256,6 +262,110 @@ export async function reviewRun(id: string, body: ReviewRequest, token: string, 
     timeoutMs: GET_TIMEOUT_MS,
     guard: isReviewSaved,
   });
+}
+
+/* ---- Automations (plan A8). Writes need the operator token and use a 30 s timeout; reads use GET_TIMEOUT_MS. ---- */
+
+const WRITE_TIMEOUT_MS = 30_000;
+const isAutomationsList = (v: unknown): v is AutomationsListResponse => isRecord(v) && Array.isArray(v.automations) && typeof v.sending_enabled === "boolean";
+const isAutomationDetail = (v: unknown): v is AutomationDetail =>
+  isRecord(v) && typeof v.id === "string" && typeof v.version === "number" && isRecord(v.graph) && Array.isArray(v.problems) && isRecord(v.secrets);
+const isCreated = (v: unknown): v is { id: string } => isRecord(v) && typeof v.id === "string";
+const isSaved = (v: unknown): v is SaveAutomationResponse => isRecord(v) && typeof v.version === "number" && Array.isArray(v.problems);
+const isEnabledAnswer = (v: unknown): v is { enabled: boolean } => isRecord(v) && typeof v.enabled === "boolean";
+const isOk = (v: unknown): v is { ok: true } => isRecord(v) && v.ok === true;
+const isExecutionStarted = (v: unknown): v is { executionId: string } => isRecord(v) && typeof v.executionId === "string";
+const isExecutions = (v: unknown): v is { executions: ExecutionListItem[] } => isRecord(v) && Array.isArray(v.executions);
+const isExecutionDetail = (v: unknown): v is ExecutionDetail => isRecord(v) && typeof v.id === "string" && Array.isArray(v.steps) && isRecord(v.graph);
+const isRunAutomations = (v: unknown): v is RunAutomationsResponse => isRecord(v) && Array.isArray(v.executions) && Array.isArray(v.notes) && typeof v.pending === "number";
+
+/** A path segment from an id, or null when it cannot be encoded (a lone surrogate). */
+function segmentOf(id: string): string | null {
+  try {
+    return encodeURIComponent(id);
+  } catch {
+    return null;
+  }
+}
+
+/** The headers of a write: the operator token (printable ASCII only, or fetch itself would throw) and a JSON body. */
+function writeHeaders(token: string): Record<string, string> | null {
+  const trimmed = token.trim();
+  return trimmed !== "" && /^[\x20-\x7e]+$/.test(trimmed) ? { "x-reset-token": trimmed, "content-type": "application/json" } : null;
+}
+
+export function getAutomations(signal?: AbortSignal): Promise<ApiResult<AutomationsListResponse>> {
+  return request("/api/automations", { signal, timeoutMs: GET_TIMEOUT_MS, guard: isAutomationsList });
+}
+
+export function getAutomation(id: string, signal?: AbortSignal): Promise<ApiResult<AutomationDetail>> {
+  const seg = segmentOf(id);
+  if (seg === null) return Promise.resolve(fail(400, "That is not a valid automation id."));
+  return request(`/api/automations/${seg}`, { signal, timeoutMs: GET_TIMEOUT_MS, guard: isAutomationDetail });
+}
+
+export type AutomationStart = "seed:route-holds" | "seed:chat-rejections" | "seed:daily-holds" | "blank:run_finished" | "blank:schedule";
+
+export function createAutomation(body: { name: string; start: AutomationStart }, token: string, signal?: AbortSignal): Promise<ApiResult<{ id: string }>> {
+  const headers = writeHeaders(token);
+  if (headers === null) return Promise.resolve(fail(0, "Enter the operator token."));
+  return request("/api/automations", { method: "POST", headers, body: JSON.stringify(body), signal, timeoutMs: WRITE_TIMEOUT_MS, guard: isCreated });
+}
+
+export interface SaveAutomationBody {
+  name: string;
+  graph: AutomationDetail["graph"];
+  version: number;
+  secrets?: Record<string, { url?: string | null; signing_secret?: string | null }>;
+}
+export function saveAutomation(id: string, body: SaveAutomationBody, token: string, signal?: AbortSignal): Promise<ApiResult<SaveAutomationResponse>> {
+  const headers = writeHeaders(token);
+  const seg = segmentOf(id);
+  if (headers === null) return Promise.resolve(fail(0, "Enter the operator token."));
+  if (seg === null) return Promise.resolve(fail(400, "That is not a valid automation id."));
+  return request(`/api/automations/${seg}`, { method: "PUT", headers, body: JSON.stringify(body), signal, timeoutMs: WRITE_TIMEOUT_MS, guard: isSaved });
+}
+
+export function setAutomationEnabled(id: string, enabled: boolean, token: string, signal?: AbortSignal): Promise<ApiResult<{ enabled: boolean }>> {
+  const headers = writeHeaders(token);
+  const seg = segmentOf(id);
+  if (headers === null) return Promise.resolve(fail(0, "Enter the operator token."));
+  if (seg === null) return Promise.resolve(fail(400, "That is not a valid automation id."));
+  return request(`/api/automations/${seg}/enabled`, { method: "POST", headers, body: JSON.stringify({ enabled }), signal, timeoutMs: WRITE_TIMEOUT_MS, guard: isEnabledAnswer });
+}
+
+export function deleteAutomation(id: string, token: string, signal?: AbortSignal): Promise<ApiResult<{ ok: true }>> {
+  const headers = writeHeaders(token);
+  const seg = segmentOf(id);
+  if (headers === null) return Promise.resolve(fail(0, "Enter the operator token."));
+  if (seg === null) return Promise.resolve(fail(400, "That is not a valid automation id."));
+  return request(`/api/automations/${seg}`, { method: "DELETE", headers, signal, timeoutMs: WRITE_TIMEOUT_MS, guard: isOk });
+}
+
+export function testAutomation(id: string, body: { run_id: string | null; send: boolean }, token: string, signal?: AbortSignal): Promise<ApiResult<{ executionId: string }>> {
+  const headers = writeHeaders(token);
+  const seg = segmentOf(id);
+  if (headers === null) return Promise.resolve(fail(0, "Enter the operator token."));
+  if (seg === null) return Promise.resolve(fail(400, "That is not a valid automation id."));
+  return request(`/api/automations/${seg}/test`, { method: "POST", headers, body: JSON.stringify(body), signal, timeoutMs: WRITE_TIMEOUT_MS, guard: isExecutionStarted });
+}
+
+export function getExecutions(id: string, limit = 25, signal?: AbortSignal): Promise<ApiResult<{ executions: ExecutionListItem[] }>> {
+  const seg = segmentOf(id);
+  if (seg === null) return Promise.resolve(fail(400, "That is not a valid automation id."));
+  return request(`/api/automations/${seg}/executions?limit=${Math.min(Math.max(Math.trunc(limit), 1), 100)}`, { signal, timeoutMs: GET_TIMEOUT_MS, guard: isExecutions });
+}
+
+export function getExecution(executionId: string, signal?: AbortSignal): Promise<ApiResult<ExecutionDetail>> {
+  const seg = segmentOf(executionId);
+  if (seg === null) return Promise.resolve(fail(400, "That is not a valid execution id."));
+  return request(`/api/automations/executions/${seg}`, { signal, timeoutMs: GET_TIMEOUT_MS, guard: isExecutionDetail });
+}
+
+export function getRunAutomations(runId: string, signal?: AbortSignal): Promise<ApiResult<RunAutomationsResponse>> {
+  const seg = segmentOf(runId);
+  if (seg === null) return Promise.resolve(fail(400, "That is not a valid run id."));
+  return request(`/api/runs/${seg}/automations`, { signal, timeoutMs: GET_TIMEOUT_MS, guard: isRunAutomations });
 }
 
 /** `/api/files/<hash>` for an <iframe src> or a link, or null when `hash` is not a 64-character lowercase hex hash. */

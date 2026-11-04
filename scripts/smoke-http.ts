@@ -617,6 +617,34 @@ async function sectionResetGuard(): Promise<void> {
     const run = await waitDone((again.json as { runId: string }).runId, IP.after);
     eq(run.decision, "APPROVE", "and it is not a duplicate of the wiped run");
   });
+
+  // Automations (plan A8): after the reset above the three seed automations exist
+  const S2 = "automations";
+  let seedId = "";
+  await check(S2, "GET /api/automations -> 200 with the 3 seed automations after the reset; sending is off", async () => {
+    const res = await http("/api/automations", { ip: IP.after });
+    eq(res.status, 200, "status");
+    const body = res.json as { automations: { id: string; seed_key: string | null; enabled: boolean }[]; sending_enabled: boolean };
+    eq(body.automations.map((a) => [a.seed_key, a.enabled]), [["route-holds", true], ["chat-rejections", false], ["daily-holds", false]], "the seeds");
+    ok(typeof body.sending_enabled === "boolean", "sending_enabled is reported");
+    seedId = body.automations[0].id;
+  });
+  await check(S2, "PUT /api/automations/<seed id> without a token -> 403 and nothing changes", async () => {
+    const res = await http(`/api/automations/${seedId}`, { method: "PUT", ip: IP.after, headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "x", graph: { nodes: [], edges: [] }, version: 1 }) });
+    eq(res.status, 403, "status");
+    ok(typeof (res.json as { error?: unknown } | null)?.error === "string", "ApiError body");
+    const after = (await http(`/api/automations/${seedId}`, { ip: IP.after })).json as { name: string; version: number };
+    eq([after.name, after.version], ["Route holds to the right person", 1], "unchanged");
+  });
+  await check(S2, "GET /api/runs/<run id>/automations -> 200 with a numeric pending count", async () => {
+    const list = (await http("/api/runs", { ip: IP.after })).json as ListJson;
+    const id = list.runs.find((r) => !r.is_history)?.id;
+    ok(id !== undefined, "a run exists");
+    const res = await http(`/api/runs/${id}/automations`, { ip: IP.after });
+    eq(res.status, 200, "status");
+    const body = res.json as { executions: unknown[]; notes: unknown[]; pending: number };
+    ok(Array.isArray(body.executions) && Array.isArray(body.notes) && typeof body.pending === "number", "shape");
+  });
 }
 
 /** A valid 1-page PDF whose content stream is `ops` non-text "q Q" operators: seconds of synchronous pdf.js work, ~60 KB. */

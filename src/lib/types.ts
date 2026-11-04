@@ -6,6 +6,7 @@
  * Pure module (imports only zod and ./json-schema), so client components may import it.
  */
 import { z } from "zod";
+import type { Graph, GraphProblem } from "./workflow-graph";
 import {
   type JsonSchemaNode,
   canonicalShape,
@@ -912,4 +913,103 @@ export interface MasterResponse {
 export interface ResetResponse {
   ok: true;
   counts: SeedCounts;
+}
+
+/* ---- Automations (contract changes, 2026-11-04; docs/CONTRACT_CHANGES.md) ---- */
+
+export type AutomationTriggerType = "run_finished" | "review_saved" | "schedule";
+export type ExecutionStatus = "queued" | "running" | "success" | "error";
+
+/** One row of GET /api/automations. */
+export interface AutomationListItem {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger_type: AutomationTriggerType;
+  /** the starting step in words ("Only invoices that are on hold") */
+  trigger_summary: string;
+  step_count: number;
+  updated_at: string;
+  last_execution: { status: ExecutionStatus; created_at: string } | null;
+  executions_24h: number;
+  problem_count: number;
+  seed_key: string | null;
+}
+/** GET /api/automations -> 200 */
+export interface AutomationsListResponse {
+  automations: AutomationListItem[];
+  /** AUTOMATION_ALLOWED_HOSTS is not empty: webhook and chat steps can really send */
+  sending_enabled: boolean;
+  /** AUTOMATIONS_ENABLED is not "false" */
+  automations_enabled: boolean;
+}
+
+/** What the API says about a webhook or chat step's secrets: never the URL itself. */
+export interface StepSecretState {
+  has_url: boolean;
+  /** "hooks.slack.com/…/a1b2" */
+  url_hint: string | null;
+  has_signing_secret: boolean;
+}
+/** GET /api/automations/:id -> 200 */
+export interface AutomationDetail {
+  id: string;
+  name: string;
+  enabled: boolean;
+  version: number;
+  graph: Graph;
+  /** by step id, for every step that sends */
+  secrets: Record<string, StepSecretState>;
+  problems: GraphProblem[];
+  updated_at: string;
+  sending_enabled: boolean;
+  allowed_hosts: string[];
+  review_trigger_available: boolean;
+}
+/** PUT /api/automations/:id -> 200. `turned_off` is true when the save switched an enabled automation off because of its problems. */
+export interface SaveAutomationResponse {
+  version: number;
+  problems: GraphProblem[];
+  turned_off: boolean;
+}
+
+export interface ExecutionListItem {
+  id: string;
+  trigger_type: "run_finished" | "review_saved" | "schedule" | "test";
+  mode: "live" | "test" | "test_send";
+  status: ExecutionStatus;
+  error: string | null;
+  run_id: string | null;
+  /** "<invoice number or file name>, <vendor name>" */
+  run_label: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+export interface ExecutionStep {
+  node_id: string;
+  idx: number;
+  type: string;
+  name: string;
+  status: "success" | "error" | "skipped";
+  chosen_output: string | null;
+  output: unknown;
+  error: string | null;
+  attempts: number;
+  started_at: string | null;
+  finished_at: string | null;
+}
+/** GET /api/automations/executions/:id -> 200 */
+export interface ExecutionDetail extends ExecutionListItem {
+  workflow_id: string;
+  workflow_name: string;
+  graph: Graph;
+  steps: ExecutionStep[];
+}
+/** GET /api/runs/:id/automations -> 200 */
+export interface RunAutomationsResponse {
+  executions: (ExecutionListItem & { workflow_id: string; workflow_name: string })[];
+  notes: { text: string; workflow_name: string; created_at: string }[];
+  assignment: { assignee: string; workflow_name: string; created_at: string } | null;
+  /** this run's executions that are queued or running */
+  pending: number;
 }
