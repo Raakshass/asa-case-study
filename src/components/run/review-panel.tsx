@@ -53,11 +53,16 @@ export function ReviewPanel({ run, onReviewed }: ReviewPanelProps) {
   const uid = useId();
   const candidates = candidatesOf(run);
   const showPo = action === "APPROVE" && needsPoChoice(run);
-  const hint = run.security_flag
-    ? `Start with "${SECURITY_REVIEW_PREFIX}" to approve.`
-    : bankFlagged(run)
-      ? `Start with "${BANK_REVIEW_PREFIX}" to approve.`
-      : null;
+  // Only an invoice can be approved (the server enforces it; the form only saves the person from a refusal).
+  const canApprove = run.extraction?.document_type === "invoice";
+  const hint =
+    run.security_flag && bankFlagged(run)
+      ? `Start with "${SECURITY_REVIEW_PREFIX}" and also write "${BANK_REVIEW_PREFIX}" to approve.`
+      : run.security_flag
+        ? `Start with "${SECURITY_REVIEW_PREFIX}" to approve.`
+        : bankFlagged(run)
+          ? `Start with "${BANK_REVIEW_PREFIX}" to approve.`
+          : null;
   const length = comment.trim().length;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -101,13 +106,16 @@ export function ReviewPanel({ run, onReviewed }: ReviewPanelProps) {
                     ["APPROVE", "Approve after review"],
                     ["REJECT", "Reject"],
                   ] as const
-                ).map(([value, label]) => (
-                  <label key={value} className="flex min-h-6 items-center gap-2 text-sm">
-                    <input type="radio" name={`${uid}-action`} value={value} checked={action === value} onChange={() => setAction(value)} className="size-4" />
-                    {label}
-                  </label>
-                ))}
+                )
+                  .filter(([value]) => canApprove || value === "REJECT")
+                  .map(([value, label]) => (
+                    <label key={value} className="flex min-h-6 items-center gap-2 text-sm">
+                      <input type="radio" name={`${uid}-action`} value={value} checked={action === value} onChange={() => setAction(value)} className="size-4" />
+                      {label}
+                    </label>
+                  ))}
               </div>
+              {canApprove ? null : <p className="text-sm text-muted-foreground">Only an invoice can be approved. This document can only be rejected here.</p>}
             </fieldset>
 
             {showPo ? (

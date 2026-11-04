@@ -2592,6 +2592,32 @@ async function reviewGroup(t: Check): Promise<void> {
     t.eq(withPrefix.status, 200, "with the prefix");
   });
 
+  await t.test("a flagged hold with a bank change needs both: it starts with Security review: and also contains Bank verified:", async () => {
+    const both: ExtractFn = async (pdf, opts) => {
+      const ex = await mockExtract(pdf, opts);
+      return ex.ok ? { ...ex, data: { ...ex.data, bank_account: "DE00-ATTACKER-9999", document_signals: { ...ex.data.document_signals, bank_change_notice: true } } } : ex;
+    };
+    const rig = makeRig();
+    const id = rig.run(sampleBytes("09-prompt-injection.pdf"));
+    await enqueue(id, rig.deps({ extract: both }));
+    const approve = (comment: string) => reviewMod.reviewRun(rig.db, id, { action: "APPROVE", comment, po_number: "PO-1008" }, FIXED_NOW);
+    for (const comment of ["Security review: false positive, verified with Globex.", "Bank verified: called the number on file, account is genuine.", "Bank verified: and Security review: both checked."]) {
+      t.eq(approve(comment).ok, false, comment);
+    }
+    t.eq(approve("Security review: false positive. Bank verified: called the number on file.").ok, true, "both, in order");
+  });
+
+  await t.test("only an invoice can be approved: sample 10 is a statement, so APPROVE is 409 and nothing changes; REJECT still works", async () => {
+    const rig = makeRig();
+    const ten = rig.run(sampleBytes("10-not-an-invoice.pdf"));
+    await enqueue(ten, rig.deps());
+    const refused = reviewMod.reviewRun(rig.db, ten, { action: "APPROVE", comment: GOOD_COMMENT, po_number: "PO-1002" }, FIXED_NOW);
+    t.eq(refused.ok ? 200 : refused.status, 409, "a statement");
+    t.includes(refused.ok ? "" : refused.error, "Only an invoice can be approved");
+    t.eq(rig.db.prepare("SELECT decision FROM invoices WHERE id = ?").pluck().get(ten), "HOLD", "nothing changed");
+    t.eq(reviewMod.reviewRun(rig.db, ten, { action: "REJECT", comment: "Sent to statement handling instead." }, FIXED_NOW).ok, true, "REJECT");
+  });
+
   await t.test("B4: a REJECT is accepted without any prefix, even on a flagged or bank-changed hold", async () => {
     const rig = makeRig();
     const id = rig.run(sampleBytes("06-bank-change.pdf"));

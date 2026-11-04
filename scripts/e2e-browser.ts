@@ -1100,6 +1100,20 @@ async function sectionAutomations(page: Page): Promise<void> {
 
 /** Review round B4: a person resolves sample 5's hold in the browser (approve, PO-1005) and the page, the PO balance and the stamp follow. */
 async function sectionReview(page: Page): Promise<void> {
+  await check("review", "a statement on hold can only be rejected: the form offers no Approve", async () => {
+    // reuse the hold from the samples section: running the same file twice is not a fresh hold
+    type Listed = { runs: { id: string; file_name: string | null; decision: string | null; reviewed: string | null }[] };
+    const listed = (await (await page.request.get(`${BASE}/api/runs?limit=200`)).json()) as Listed;
+    let runId = listed.runs.find((r) => r.file_name === "10-not-an-invoice.pdf" && r.decision === "HOLD" && r.reviewed === null)?.id;
+    if (runId === undefined) {
+      const made = await page.request.post(`${BASE}/api/runs`, { data: { sample: "10-not-an-invoice.pdf" }, headers: { "x-forwarded-for": "203.0.113.200" } });
+      runId = ((await made.json()) as { runId: string }).runId;
+    }
+    await page.goto(`${BASE}/runs/${runId}`, { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: "Resolve this hold" }).click({ timeout: 30_000 });
+    await page.getByText("Only an invoice can be approved").waitFor();
+    eq(await page.getByLabel("Approve after review").count(), 0, "no Approve choice");
+  });
   await check("review", "resolve sample 5's hold: approve after review with PO-1005; the stamp, the PO balance and the page follow", async () => {
     type Listed = { runs: { id: string; file_name: string | null; decision: string | null; reviewed: string | null }[] };
     const listed = (await (await page.request.get(`${BASE}/api/runs?limit=200`)).json()) as Listed;

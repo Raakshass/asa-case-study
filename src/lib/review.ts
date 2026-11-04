@@ -38,6 +38,18 @@ function bankFlagged(db: DB, runId: string): boolean {
   }
 }
 
+/** The extracted document type, or null when nothing readable was extracted. */
+function documentType(db: DB, runId: string): string | null {
+  const text = db.prepare("SELECT extraction FROM runs WHERE id = ?").pluck().get(runId) as string | null | undefined;
+  if (typeof text !== "string") return null;
+  try {
+    const parsed = JSON.parse(text) as { document_type?: unknown } | null;
+    return typeof parsed?.document_type === "string" ? parsed.document_type : null;
+  } catch {
+    return null;
+  }
+}
+
 export function reviewRun(db: DB, runId: string, input: ReviewRequest, now: Date = new Date()): ReviewOutcome {
   return db.transaction((): ReviewOutcome => {
     const run = db.prepare("SELECT status, decision, security_flag FROM runs WHERE id = ?").get(runId) as
@@ -50,10 +62,19 @@ export function reviewRun(db: DB, runId: string, input: ReviewRequest, now: Date
     const comment = cleanComment(input.comment);
     if (comment.length < COMMENT_MIN || comment.length > COMMENT_MAX) return fail(400, "Write a comment of 10 to 500 characters that says what was checked.");
     const approving = input.action === "APPROVE";
-    if (run.security_flag === 1 && approving && !comment.startsWith(SECURITY_REVIEW_PREFIX)) {
-      return fail(400, `A flagged invoice can only be approved with a comment that starts with "${SECURITY_REVIEW_PREFIX}".`);
+    if (approving && documentType(db, runId) !== "invoice") {
+      return fail(409, "Only an invoice can be approved. Reject this document with a comment saying where it should go.");
     }
-    if (approving && bankFlagged(db, runId) && !comment.startsWith(BANK_REVIEW_PREFIX)) {
+    const securityFlagged = run.security_flag === 1;
+    const bankChanged = approving && bankFlagged(db, runId);
+    if (approving && securityFlagged && bankChanged) {
+      // Both people's checks are on record: one fixed order, so a single comment can satisfy both rules.
+      if (!comment.startsWith(SECURITY_REVIEW_PREFIX) || !comment.includes(BANK_REVIEW_PREFIX)) {
+        return fail(400, `This invoice is flagged and has new or different bank details. Approve it with a comment that starts with "${SECURITY_REVIEW_PREFIX}" and also contains "${BANK_REVIEW_PREFIX}".`);
+      }
+    } else if (approving && securityFlagged && !comment.startsWith(SECURITY_REVIEW_PREFIX)) {
+      return fail(400, `A flagged invoice can only be approved with a comment that starts with "${SECURITY_REVIEW_PREFIX}".`);
+    } else if (bankChanged && !comment.startsWith(BANK_REVIEW_PREFIX)) {
       return fail(400, `An invoice with new or different bank details can only be approved with a comment that starts with "${BANK_REVIEW_PREFIX}".`);
     }
 
@@ -67,6 +88,7 @@ export function reviewRun(db: DB, runId: string, input: ReviewRequest, now: Date
         // The PO, amounts, duplicate and bank stages never ran for an unknown vendor: approving here would skip four checks.
         return fail(409, "The vendor is not resolved, so this invoice cannot be approved here. Reject it with a comment naming the right vendor, and ask the sender for a corrected invoice.");
       }
+      if (row.total === null && row.subtotal === null) return fail(409, "This invoice has no amount, so it cannot be approved here. Reject it and ask the sender for a corrected invoice.");
       const chosen = (input.po_number ?? "").trim() || (row.po_inferred ? "" : (row.po_number ?? ""));
       if (chosen === "") return fail(400, "Choose the PO this invoice bills against.");
       const po = snapshot.pos.find((p) => normId(p.po_number) === normId(chosen));
