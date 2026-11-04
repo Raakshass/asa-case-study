@@ -4,6 +4,7 @@
  *   contracts  - shared modules and data shapes (contracts step)
  *   business   - normalize + rules on the truth samples (Phase 3)
  *   guardrails - pdf + guardrails on the sample PDFs (Phase 4)
+ *   automations - the Automations graph module, store, engine and sender (plan A1 onward)
  * Each group module is imported on demand, so a broken group fails alone instead of crashing the run.
  * Exit code 1 if any check fails. Owner: contracts step.
  */
@@ -15,6 +16,7 @@ const GROUPS: Record<string, () => Promise<GroupModule>> = {
   contracts: () => import("./checks/contracts"),
   business: () => import("./checks/business"),
   guardrails: () => import("./checks/guardrails"),
+  automations: () => import("./checks/automations"),
 };
 
 async function main(): Promise<number> {

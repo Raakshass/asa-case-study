@@ -122,9 +122,9 @@ function clientBoundary(): void {
       queue.push(target);
     }
   }
-  const allowed = new Set([path.join(LIB, "types.ts"), path.join(LIB, "format.ts")]);
+  const allowed = new Set([path.join(LIB, "types.ts"), path.join(LIB, "format.ts"), path.join(LIB, "workflow-graph.ts")]);
   const bad = [...libDirect.entries()].filter(([lib]) => !allowed.has(lib)).map(([lib, by]) => `${rel(lib)} (imported by ${[...by].join(", ")})`);
-  report(bad.length === 0, `client code imports from src/lib only types.ts and format.ts (${[...libDirect.keys()].map(rel).join(", ") || "none"})`, bad.join("\n        "));
+  report(bad.length === 0, `client code imports from src/lib only types.ts, format.ts and workflow-graph.ts (${[...libDirect.keys()].map(rel).join(", ") || "none"})`, bad.join("\n        "));
   const libReached = [...seen].filter((f) => f.startsWith(LIB + path.sep)).map(rel).sort();
   report(serverImports.length === 0, `no client file, and no src/lib file they pull in (${libReached.join(", ")}), imports a Node built-in or a server-only package`, serverImports.join("\n        "));
   report(unresolved.length === 0, `every local import of the client graph resolves (${seen.size} files checked)`, unresolved.join("\n        "));

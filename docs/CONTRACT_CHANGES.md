@@ -238,3 +238,10 @@ Entry format:
 - Tests: `scripts/test-api.ts` group "review" (11 tests: the approve flow through the route with the list, KPIs and PO balance; token, id and body refusals; not-a-hold and over-balance; the two prefixes; a REJECT without a prefix; a rejected hold no longer blocks a corrected copy (with an unreviewed control); a "multiple documents" hold; a near-miss vendor hold; the PO rules; a reset wipes reviews; the write limit); the strict run schemas of `test-api.ts` know `review` and `reviewed`; `scripts/checks/contracts.ts` lists `run_reviews`; `scripts/e2e-browser.ts` section "review" (E4).
 - Why: review plan task B4.
 - Affects: a client that validates `GET /api/runs` or `GET /api/runs/:id` with a strict schema must accept the two new keys.
+
+## 2026-11-04 Automations A1 - src/lib/workflow-graph.ts, scripts/check-static.ts (a pure module; client allowlist widened by one file)
+- Before: client code could import only `src/lib/types.ts` and `format.ts`.
+- After: `src/lib/workflow-graph.ts` is a pure module (zod, the types of `./types`, `./format`): the step catalogue (`NODE_TYPES`, `NODE_SPECS`), the settings schemas (`CONFIG_SCHEMAS`), the graph schema (`Graph`, at most 30 steps and 60 connections: `GRAPH_MAX_NODES`/`GRAPH_MAX_EDGES`, mirrored by `CONFIG.automationMaxNodes`/`automationMaxEdges` once A2 adds them), the values a step may use (`VARIABLES`), and the helpers `templateVars`, `renderTemplate`, `evaluateCondition`, `topoOrder`, `availableSources`, `validateGraph`, `summarizeStep`, `nextNodeId`. Client code may also import it; `scripts/check-static.ts` allows exactly that file and still fails the build when it, or anything it pulls in, imports a Node built-in or a server-only package.
+- Tests: new check group `automations` (`scripts/checks/automations.ts`, 19 tests).
+- Why: Automations plan task A1; the editor and the engine must validate with the same code.
+- Affects: nobody (nothing uses it yet).
