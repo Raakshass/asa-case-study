@@ -2283,6 +2283,39 @@ export async function run(t: Check): Promise<void> {
     t.eq(extra.action, "Ask the vendor for a corrected invoice, or the buyer for a PO amendment if the higher unit price and the extra units are agreed.");
   });
 
+  await t.test("review round B13: the amounts advice says 'extra units' only when a line is billed for more units than it orders", () => {
+    // Built by hand: a real PO-1003 invoice would also exceed the PO balance and take the earlier "credit of $X" branch.
+    const asked = (over: Record<string, unknown>) => {
+      const amounts: StepResult = {
+        status: "fail",
+        severity: "hold",
+        reason: "x",
+        detail: { within_tolerance: true, price_within_tolerance: true, unmatched_within_tolerance: true, line_totals_within_tolerance: false, line_totals: [{ quantity_over: false }], ...over },
+      };
+      return nextAction("HOLD", { amounts }, emptyCtx());
+    };
+    const sentence = "Ask the buyer whether billing above the value of the PO lines was agreed (PO amendment), or the vendor for a corrected invoice.";
+    t.eq(asked({}), sentence, "a lump-sum or no-quantity line billed above its value: no extra units");
+    t.eq(
+      asked({ unmatched_within_tolerance: false }),
+      "Ask the buyer whether billing above the value of the PO lines and the items that are not on the PO were agreed (PO amendment), or the vendor for a corrected invoice.",
+    );
+    t.eq(
+      asked({ line_totals: [{ quantity_over: true }] }),
+      "Ask the buyer whether the extra units or items billed against the PO lines were ordered (PO amendment), or the vendor for a corrected invoice.",
+      "genuine extra units keep their sentence",
+    );
+    t.eq(
+      asked({ unmatched_within_tolerance: false, line_totals: [{ quantity_over: true }] }),
+      "Ask the buyer whether the extra units and the items that are not on the PO were ordered (PO amendment), or the vendor for a corrected invoice.",
+    );
+    t.eq(
+      asked({ line_totals_within_tolerance: true, unmatched_within_tolerance: false }),
+      "Ask the buyer whether the items that are not on the PO were ordered (PO amendment), or the vendor for a corrected invoice.",
+      "only items that are not on the PO",
+    );
+  });
+
   await t.test("fix round DEC-2: an invoice number that differs from an earlier one only by look-alike characters or zero padding is held, whatever the date and the amount", async () => {
     const lookalike = (printed: string, over: Partial<InvoiceExtraction> = {}) =>
       acme({ invoice_number: printed, po_reference: "PO-1007", invoice_date: "2026-10-28", due_date: null, line_items: [], subtotal: 2900, tax: 290, total: 3190, ...over });

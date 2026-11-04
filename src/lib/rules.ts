@@ -1585,19 +1585,25 @@ export function nextAction(decision: Decision, steps: StepMap, ctx: DecisionCont
     const priceFailed = detail?.price_within_tolerance === false;
     const unmatchedFailed = detail?.unmatched_within_tolerance === false;
     const totalsFailed = detail?.line_totals_within_tolerance === false;
+    // A higher unit price on the full quantity also puts the line's value over the PO line, so "extra units" only when a
+    // PO line is billed for more units than it orders (DEC-1-R1).
+    const extraUnits =
+      Array.isArray(detail?.line_totals) && detail.line_totals.some((t) => typeof t === "object" && t !== null && (t as { quantity_over?: unknown }).quantity_over === true);
     if (detail?.within_tolerance === true && !priceFailed && (unmatchedFailed || totalsFailed)) {
       if (!totalsFailed) return "Ask the buyer whether the items that are not on the PO were ordered (PO amendment), or the vendor for a corrected invoice.";
-      if (!unmatchedFailed) return "Ask the buyer whether the extra units or items billed against the PO lines were ordered (PO amendment), or the vendor for a corrected invoice.";
-      return "Ask the buyer whether the extra units and the items that are not on the PO were ordered (PO amendment), or the vendor for a corrected invoice.";
+      if (!unmatchedFailed) {
+        return extraUnits
+          ? "Ask the buyer whether the extra units or items billed against the PO lines were ordered (PO amendment), or the vendor for a corrected invoice."
+          : "Ask the buyer whether billing above the value of the PO lines was agreed (PO amendment), or the vendor for a corrected invoice."; // review round B13
+      }
+      return extraUnits
+        ? "Ask the buyer whether the extra units and the items that are not on the PO were ordered (PO amendment), or the vendor for a corrected invoice."
+        : "Ask the buyer whether billing above the value of the PO lines and the items that are not on the PO were agreed (PO amendment), or the vendor for a corrected invoice.";
     }
     if (detail?.within_tolerance === true && priceFailed && detail.tax_inclusive === true) {
       // the prices include tax and the PO is pre-tax: the difference may be only the tax (DEC-5)
       return "Check the pre-tax prices: the invoice prices include tax and the PO is pre-tax. Ask the vendor for an invoice with prices before tax, or the buyer for a PO amendment if the higher price is agreed.";
     }
-    // A higher unit price on the full quantity also puts the line's value over the PO line, so "extra units" only when a
-    // PO line is billed for more units than it orders (DEC-1-R1).
-    const extraUnits =
-      Array.isArray(detail?.line_totals) && detail.line_totals.some((t) => typeof t === "object" && t !== null && (t as { quantity_over?: unknown }).quantity_over === true);
     if (detail?.within_tolerance === true && totalsFailed && extraUnits) {
       return "Ask the vendor for a corrected invoice, or the buyer for a PO amendment if the higher unit price and the extra units are agreed.";
     }
