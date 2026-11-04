@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { insertSeedWorkflows } from "./automations/seed-workflows";
 import { paths } from "./config";
 import type { DB } from "./db";
 import { normId, round2 } from "./format";
@@ -187,7 +188,8 @@ export function validateSeedData(data: SeedData): string[] {
 /**
  * Replaces all demo state with `data` in one transaction: clears run_steps, runs, invoices,
  * purchase_orders and vendors, then inserts vendors, POs, and per history row one synthetic `done` run
- * (model "history", no steps) plus its invoices row (id = run id).
+ * (model "history", no steps) plus its invoices row (id = run id). Also deletes every execution, note, assignment and
+ * automation and recreates the three seed automations (Automations plan D8), so a reset leaves nothing a visitor made.
  */
 export function seedFromData(db: DB, data: SeedData): SeedCounts {
   const parsed = SeedDataSchema.safeParse(data);
@@ -195,9 +197,10 @@ export function seedFromData(db: DB, data: SeedData): SeedCounts {
   const problems = validateSeedData(parsed.data);
   if (problems.length > 0) throw new SeedDataError(`Seed data is inconsistent:\n- ${problems.join("\n- ")}`);
   const { vendors, purchaseOrders, history } = parsed.data;
+  const now = new Date().toISOString();
 
   const run = db.transaction((): SeedCounts => {
-    db.exec("DELETE FROM run_reviews; DELETE FROM run_steps; DELETE FROM runs; DELETE FROM invoices; DELETE FROM purchase_orders; DELETE FROM vendors;");
+    db.exec("DELETE FROM workflow_execution_steps; DELETE FROM workflow_executions; DELETE FROM run_notes; DELETE FROM run_assignments; DELETE FROM workflows; DELETE FROM run_reviews; DELETE FROM run_steps; DELETE FROM runs; DELETE FROM invoices; DELETE FROM purchase_orders; DELETE FROM vendors;");
     const insVendor = db.prepare(
       "INSERT INTO vendors (id, name, aliases, approved, bank_account, phone_on_file) VALUES (?, ?, ?, ?, ?, ?)",
     );
@@ -238,6 +241,8 @@ export function seedFromData(db: DB, data: SeedData): SeedCounts {
         created_at: at,
       });
     }
+    insertSeedWorkflows(db, now);
+    db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('workflows_seeded', ?)").run(now);
     return { vendors: vendors.length, purchase_orders: purchaseOrders.length, invoices: history.length, runs: history.length };
   });
   return run();

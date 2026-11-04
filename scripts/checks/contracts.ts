@@ -196,12 +196,21 @@ export async function run(t: Check): Promise<void> {
       t.eq(names, [
         { type: "index", name: "idx_inv_hash" },
         { type: "index", name: "idx_inv_vendor_num" },
+        { type: "index", name: "idx_notes_run" },
+        { type: "index", name: "idx_wfx_run" },
+        { type: "index", name: "idx_wfx_wf" },
+        { type: "table", name: "app_meta" },
         { type: "table", name: "invoices" },
         { type: "table", name: "purchase_orders" },
+        { type: "table", name: "run_assignments" },
+        { type: "table", name: "run_notes" },
         { type: "table", name: "run_reviews" },
         { type: "table", name: "run_steps" },
         { type: "table", name: "runs" },
         { type: "table", name: "vendors" },
+        { type: "table", name: "workflow_execution_steps" },
+        { type: "table", name: "workflow_executions" },
+        { type: "table", name: "workflows" },
       ]);
       const cols = db.prepare("SELECT name FROM pragma_table_info('runs')").pluck().all();
       t.eq(cols, ["id", "file_name", "file_hash", "status", "decision", "decision_reasons", "next_action", "security_flag", "extraction", "raw_model_output", "model", "prompt_version", "cost_usd", "created_at", "finished_at"]);

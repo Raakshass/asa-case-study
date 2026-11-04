@@ -245,3 +245,16 @@ Entry format:
 - Tests: new check group `automations` (`scripts/checks/automations.ts`, 19 tests).
 - Why: Automations plan task A1; the editor and the engine must validate with the same code.
 - Affects: nobody (nothing uses it yet).
+
+## 2026-11-04 Automations A2 - src/lib/db.ts, config.ts, seed.ts, src/lib/automations/{store,seed-workflows}.ts, .env.example (six tables, three env variables, ten config values)
+- Before: no table for automations; `SCHEMA_SQL` is the plan's section 4 verbatim.
+- After:
+  - **Schema.** `EXTRA_SCHEMA_SQL` (next to `SCHEMA_SQL`, which stays verbatim; schema additions live in `EXTRA_SCHEMA_SQL`) also creates `workflows`, `workflow_executions` (`UNIQUE (workflow_id, trigger_key)` makes dispatch idempotent), `workflow_execution_steps`, `run_notes`, `run_assignments` and `app_meta`, with the indexes `idx_wfx_run`, `idx_wfx_wf` and `idx_notes_run`. No foreign keys, like the existing tables. The contracts test lists all of them.
+  - **Reset and first boot.** `seedFromData` deletes executions, steps, notes, assignments and every automation, then recreates the three seed automations and writes `app_meta('workflows_seeded')`. `getDb()` calls `ensureWorkflowsSeeded` after `ensureSeeded`, so a database seeded before this feature gets the three seeds once; a person who deletes them all is not re-seeded on a restart.
+  - **Recovery.** `recoverInterruptedExecutions` (called by `openDb` with `recover`, after `recoverInterruptedRuns`) turns queued or running executions into errors with the fixed text "Interrupted by restart."
+  - **Config.** `CONFIG.automationMaxNodes` (30), `automationMaxEdges` (60), `automationGraphMaxBytes` (131072), `automationStepTimeoutMs` (10000), `automationSendAttempts` (3), `automationMaxExecutionsPerHour` (300), `automationMaxSendsPerHour` (60), `automationKeepExecutions` (500), `automationSchedulerTickMs` (60000), `automationResponseKeepChars` (300).
+  - **Environment.** `AUTOMATIONS_ENABLED` (anything but "false" is on), `AUTOMATION_ALLOWED_HOSTS` (comma list; empty means sending is off), `APP_BASE_URL` (https://host or http://localhost:port; anything else is ignored with one warning). All three are in `.env.example`.
+  - **Store.** `src/lib/automations/store.ts`: plain functions over the database; all SQL of the feature lives there, in the engine and in the seed file (A3's static guard).
+- Tests: check group `automations` (11 more tests: the seeds, first-boot seeding, reset, versioned saves, enable and delete, idempotent insert and claim, pruning, the hourly counters, recovery, `maskUrl` and `parseSecrets`, the limits mirror the config); the contracts test lists the new objects.
+- Why: Automations plan task A2.
+- Affects: a database file gets six new tables on its next open; nothing existing changes.

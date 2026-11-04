@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
+import { ensureWorkflowsSeeded } from "./automations/seed-workflows";
 import { paths } from "./config";
 import { SeedDataError, seedDatabase } from "./seed";
 import type { SeedCounts } from "./types";
@@ -62,6 +63,61 @@ CREATE TABLE IF NOT EXISTS run_reviews (
   previous_decision TEXT NOT NULL,            -- always HOLD today
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS workflows (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  enabled_at TEXT,                              -- when it was last turned on (the scheduler never fires a slot before it)
+  trigger_type TEXT NOT NULL,                   -- run_finished|review_saved|schedule (copied from the graph's trigger on save)
+  graph TEXT NOT NULL,                          -- JSON Graph (workflow-graph.ts); never holds secrets
+  secrets TEXT NOT NULL DEFAULT '{}',           -- JSON { [nodeId]: { url?: string, signing_secret?: string } }
+  version INTEGER NOT NULL DEFAULT 1,           -- +1 on every save (optimistic concurrency)
+  seed_key TEXT,                                -- "route-holds" | "chat-rejections" | "daily-holds" for seeds, else NULL
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workflow_executions (
+  id TEXT PRIMARY KEY,
+  workflow_id TEXT NOT NULL,
+  workflow_name TEXT NOT NULL,                  -- as it was at the start (the workflow may be renamed or deleted later)
+  workflow_version INTEGER NOT NULL,
+  graph TEXT NOT NULL,                          -- the graph snapshot this execution ran
+  trigger_type TEXT NOT NULL,                   -- run_finished|review_saved|schedule|test
+  trigger_key TEXT NOT NULL,                    -- run:<runId> | review:<runId> | schedule:<slot ISO> | test:<uuid>
+  run_id TEXT,                                  -- the invoice run it is about (NULL for schedule)
+  mode TEXT NOT NULL,                           -- live|test|test_send
+  status TEXT NOT NULL,                         -- queued|running|success|error
+  error TEXT,                                   -- fixed text, never raw exception text
+  vars TEXT NOT NULL,                           -- JSON snapshot of the trigger variables
+  created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+  UNIQUE (workflow_id, trigger_key)
+);
+CREATE INDEX IF NOT EXISTS idx_wfx_run ON workflow_executions(run_id);
+CREATE INDEX IF NOT EXISTS idx_wfx_wf ON workflow_executions(workflow_id, created_at);
+CREATE TABLE IF NOT EXISTS workflow_execution_steps (
+  execution_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  idx INTEGER NOT NULL,                         -- position in the topological order
+  type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL,                         -- success|error|skipped
+  chosen_output TEXT,                           -- the output handle taken ("out", "true", "HOLD", ...)
+  output TEXT,                                  -- JSON, at most 16 KB (truncated with "truncated": true)
+  error TEXT,                                   -- fixed text
+  attempts INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT, finished_at TEXT,
+  PRIMARY KEY (execution_id, node_id)
+);
+CREATE TABLE IF NOT EXISTS run_notes (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL, execution_id TEXT NOT NULL, workflow_name TEXT NOT NULL,
+  text TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notes_run ON run_notes(run_id);
+CREATE TABLE IF NOT EXISTS run_assignments (
+  run_id TEXT PRIMARY KEY, assignee TEXT NOT NULL, execution_id TEXT NOT NULL, workflow_name TEXT NOT NULL,
+  created_at TEXT NOT NULL                       -- the latest assignment wins (upsert)
+);
+CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
 
 /** runs.decision_reasons of a run found queued/running at startup (plan section 4). */
@@ -86,7 +142,10 @@ export function openDb(file: string, opts: OpenDbOptions = {}): DB {
   db.pragma("synchronous = NORMAL");
   db.exec(SCHEMA_SQL);
   db.exec(EXTRA_SCHEMA_SQL);
-  if (opts.recover) recoverInterruptedRuns(db);
+  if (opts.recover) {
+    recoverInterruptedRuns(db);
+    recoverInterruptedExecutions(db);
+  }
   return db;
 }
 
@@ -117,6 +176,19 @@ export function recoverInterruptedRuns(db: DB, now: Date = new Date()): number {
     return ids.length;
   });
   return recover();
+}
+
+/**
+ * Startup recovery for automations: an execution found queued or running at startup was cut off by the restart, so it
+ * becomes an error with a fixed text. Its steps keep whatever they wrote; the idempotent trigger key stops a second
+ * execution of the same invoice. Returns the number recovered. (The SQL is inline: db.ts imports nothing else from the
+ * automations folder.)
+ */
+export function recoverInterruptedExecutions(db: DB, now: Date = new Date()): number {
+  const result = db
+    .prepare("UPDATE workflow_executions SET status = 'error', error = 'Interrupted by restart.', finished_at = ? WHERE status IN ('queued', 'running')")
+    .run(now.toISOString());
+  return result.changes;
 }
 
 export interface EnsureSeededResult {
@@ -159,6 +231,7 @@ export function getDb(): DB {
   g.__invoiceApDb?.db.close();
   const db = openDb(file, { recover: true });
   ensureSeeded(db);
+  ensureWorkflowsSeeded(db);
   g.__invoiceApDb = { db, file };
   return db;
 }

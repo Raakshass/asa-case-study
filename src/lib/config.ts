@@ -74,9 +74,23 @@ export const CONFIG = {
   maxUploadsInFlightPerIp: 2,
   maxUploadsInFlight: 16,
   uploadsBusyRetryAfterSec: 5, // Retry-After of that 429: an upload in progress usually ends within seconds
+
+  // ---- Automations (docs/CONTRACT_CHANGES.md, plan A2) ----
+  automationMaxNodes: 30,
+  automationMaxEdges: 60,
+  automationGraphMaxBytes: 131_072, // PUT body limit for a graph
+  automationStepTimeoutMs: 10_000, // one outbound attempt
+  automationSendAttempts: 3, // 429 / 5xx / network -> retry after 1 s, then 4 s
+  automationMaxExecutionsPerHour: 300, // all automations together; more are recorded as skipped
+  automationMaxSendsPerHour: 60, // outbound webhook/chat sends, all automations together
+  automationKeepExecutions: 500, // per automation; older ones are deleted when a new one is created
+  automationSchedulerTickMs: 60_000,
+  automationResponseKeepChars: 300, // of an outbound response body, stored as untrusted text; executions are PUBLIC (D5), so keep only enough to debug ("ok", an error line)
 } as const;
 
 export type MockMode = "off" | "truth" | "fooled";
+
+let baseUrlWarned = false;
 
 function envString(name: string): string {
   return (process.env[name] ?? "").trim();
@@ -114,6 +128,28 @@ export const ENV = {
   /** true only when DEMO_RESET_ENABLED is exactly "true". */
   get demoResetEnabled(): boolean {
     return envString("DEMO_RESET_ENABLED") === "true";
+  },
+  /** AUTOMATIONS_ENABLED: anything but "false" is on. Off stops dispatch and the scheduler; the pages and editing still work. */
+  get automationsEnabled(): boolean {
+    return envString("AUTOMATIONS_ENABLED").toLowerCase() !== "false";
+  },
+  /** AUTOMATION_ALLOWED_HOSTS: lower-cased, trimmed, trailing dots removed, empty entries dropped. "*.x.com" = any subdomain of x.com (not x.com itself). */
+  get automationAllowedHosts(): string[] {
+    return envString("AUTOMATION_ALLOWED_HOSTS")
+      .split(",")
+      .map((h) => h.trim().toLowerCase().replace(/\.+$/, ""))
+      .filter((h) => h !== "");
+  },
+  /** APP_BASE_URL: https://... (or http://localhost:<port>), no trailing slash; anything else -> null (warned once, the first time it is read). */
+  get appBaseUrl(): string | null {
+    const raw = envString("APP_BASE_URL").replace(/\/+$/, "");
+    if (raw === "") return null;
+    if (/^https:\/\/[^\s/?#]+$/i.test(raw) || /^http:\/\/localhost:\d{1,5}$/i.test(raw)) return raw;
+    if (!baseUrlWarned) {
+      baseUrlWarned = true;
+      console.warn(JSON.stringify({ event: "config", warning: "APP_BASE_URL is ignored: use https://host or http://localhost:<port>" }));
+    }
+    return null;
   },
   /** DEMO_RESET_TOKEN, or null when unset or shorter than 16 characters (reset must then be refused). */
   get demoResetToken(): string | null {

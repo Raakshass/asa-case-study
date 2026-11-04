@@ -2,6 +2,31 @@
  * Group "automations": the shared graph module (src/lib/workflow-graph.ts, plan A1) and, as the tasks land, the store,
  * the engine, the sender and the scheduler. No network, no model, a fixed clock.
  */
+import { SEED_WORKFLOWS, ensureWorkflowsSeeded, insertSeedWorkflows, seedGraph } from "../../src/lib/automations/seed-workflows";
+import {
+  assignRun,
+  addNote,
+  claimExecution,
+  countExecutionsSince,
+  countSendsSince,
+  deleteWorkflow,
+  executionsForRun,
+  finishExecution,
+  getExecution,
+  getWorkflow,
+  insertExecution,
+  listExecutions,
+  listWorkflows,
+  maskUrl,
+  parseSecrets,
+  saveWorkflow,
+  setEnabled,
+  writeStep,
+  type ExecutionRow,
+} from "../../src/lib/automations/store";
+import { CONFIG } from "../../src/lib/config";
+import { openDb, recoverInterruptedExecutions } from "../../src/lib/db";
+import { seedDatabase } from "../../src/lib/seed";
 import { formatUsd } from "../../src/lib/format";
 import {
   CONFIG_SCHEMAS,
@@ -23,7 +48,7 @@ import {
   type NodeType,
   type Vars,
 } from "../../src/lib/workflow-graph";
-import type { Check } from "./harness";
+import { FIXED_NOW, openSeededMemoryDb, type Check } from "./harness";
 
 /* ---- builders ---- */
 
@@ -38,49 +63,31 @@ const edge = (source: string, sourceHandle: string, target: string): GraphEdge =
 const graphOf = (nodes: GraphNode[], edges: GraphEdge[]): Graph => ({ nodes, edges });
 const messages = (g: unknown, opts?: Parameters<typeof validateGraph>[1]): string[] => validateGraph(g, opts).problems.map((p) => p.message);
 
-/** The three seed automations of plan 7.3 (the store's seed-workflows.ts holds the same graphs). */
+/** The three seed automations of plan 7.3, as the store seeds them. */
 export function inlineSeeds(): { route: Graph; chat: Graph; daily: Graph } {
-  const route = graphOf(
-    [
-      node("start", "trigger.run_finished", "When an invoice is decided", 0, 0, { decisions: ["HOLD"], include_errors: false }),
-      node("if-security", "logic.if", "Security flag?", 280, 0, { combine: "all", conditions: [{ field: "run.security_flag", op: "is_true", value: null }] }),
-      node("assign-security", "action.assign", "Assign to Finance security", 560, -80, { assignee: "Finance security" }),
-      node("note-security", "action.note", "Note the reason", 840, -80, { text: "Security review needed before any payment: {{run.first_reason}}" }),
-      node("if-large", "logic.if", "Over $5,000?", 560, 80, { combine: "all", conditions: [{ field: "run.total", op: "gt", value: 5000 }] }),
-      node("assign-lead", "action.assign", "Assign to AP lead", 840, 40, { assignee: "AP lead" }),
-      node("assign-clerk", "action.assign", "Assign to AP clerk", 840, 140, { assignee: "AP clerk" }),
-    ],
-    [
-      edge("start", "out", "if-security"),
-      edge("if-security", "true", "assign-security"),
-      edge("assign-security", "out", "note-security"),
-      edge("if-security", "false", "if-large"),
-      edge("if-large", "true", "assign-lead"),
-      edge("if-large", "false", "assign-clerk"),
-    ],
-  );
-  const chat = graphOf(
-    [
-      node("start", "trigger.run_finished", "When an invoice is decided", 0, 0, { decisions: ["REJECT"], include_errors: false }),
-      node("chat", "action.chat", "Post to the team chat", 280, 0, { text: "Rejected: {{run.vendor_name}} {{run.invoice_number}} ({{run.total}}). {{run.first_reason}} {{run.url}}" }),
-    ],
-    [edge("start", "out", "chat")],
-  );
-  const daily = graphOf(
-    [
-      node("start", "trigger.schedule", "On a schedule", 0, 0, { every: "day", hour: 8, minute: 0 }),
-      node("summarize", "data.summarize", "Summarize holds", 280, 0, { window_hours: 24, decisions: ["HOLD"], max_items: 10 }),
-      node("if-any", "logic.if", "Any holds?", 560, 0, { combine: "all", conditions: [{ field: "summary.count", op: "gt", value: 0 }] }),
-      node("chat", "action.chat", "Post the summary", 840, 0, { text: "{{summary.count}} invoices on hold in the last {{summary.window_hours}} hours ({{summary.total_value}}):\n{{summary.list}}" }),
-    ],
-    [edge("start", "out", "summarize"), edge("summarize", "out", "if-any"), edge("if-any", "true", "chat")],
-  );
-  return { route, chat, daily };
+  const graph = (key: string): Graph => seedGraph(key) as Graph;
+  return { route: graph("route-holds"), chat: graph("chat-rejections"), daily: graph("daily-holds") };
 }
 
 /** trigger -> note, to be varied by the tests below. */
 const withNote = (text: string, trigger: GraphNode = node("start", "trigger.run_finished", "Start", 0, 0)): Graph =>
   graphOf([trigger, node("note", "action.note", "Note", 280, 0, { text })], [edge(trigger.id, "out", "note")]);
+
+const execRow = (over: Partial<ExecutionRow> & Pick<ExecutionRow, "id" | "workflow_id" | "trigger_key">): ExecutionRow => ({
+  workflow_name: "W",
+  workflow_version: 1,
+  graph: "{}",
+  trigger_type: "run_finished",
+  run_id: null,
+  mode: "live",
+  status: "queued",
+  error: null,
+  vars: "{}",
+  created_at: FIXED_NOW.toISOString(),
+  started_at: null,
+  finished_at: null,
+  ...over,
+});
 
 export async function run(t: Check): Promise<void> {
   await t.test("A1: the three seed graphs validate with no problems", () => {
@@ -340,5 +347,191 @@ export async function run(t: Check): Promise<void> {
     t.eq(summarizeStep(n("action.chat", { text: "" })), "No message yet");
     t.eq(summarizeStep(n("action.chat", { text: "Hello team" })), "Hello team");
     t.eq(summarizeStep(n("action.chat", { text: 5 })), "Settings are not valid", "a step with broken settings still gets a sentence");
+  });
+
+  /* ---------------------------------------------------------------------------- A2: tables, store, seeds */
+
+  await t.test("A2: a seeded database has the three seed automations (seed 1 on, 2 and 3 off), valid and without secrets", () => {
+    const db = openSeededMemoryDb();
+    try {
+      const rows = listWorkflows(db);
+      t.eq(rows.map((r) => [r.seed_key, r.name, r.enabled, r.trigger_type, r.version, r.secrets]), [
+        ["route-holds", "Route holds to the right person", 1, "run_finished", 1, "{}"],
+        ["chat-rejections", "Tell the team about rejections", 0, "run_finished", 1, "{}"],
+        ["daily-holds", "Morning summary of holds", 0, "schedule", 1, "{}"],
+      ]);
+      t.ok(rows[0].enabled_at !== null && rows[1].enabled_at === null && rows[2].enabled_at === null, "only an enabled seed has an enabled_at");
+      for (const r of rows) t.eq(validateGraph(JSON.parse(r.graph)).problems.map((p) => p.message), [], r.name);
+      t.eq(db.prepare("SELECT value FROM app_meta WHERE key = 'workflows_seeded'").pluck().get() !== undefined, true);
+      t.eq(SEED_WORKFLOWS.map((s) => s.seed_key), ["route-holds", "chat-rejections", "daily-holds"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A2: ensureWorkflowsSeeded seeds an old database once, and never again, even after every automation is deleted", () => {
+    const db = openDb(":memory:");
+    try {
+      t.eq(listWorkflows(db).length, 0, "a fresh schema has none");
+      t.eq(ensureWorkflowsSeeded(db, FIXED_NOW), true);
+      t.eq(listWorkflows(db).length, 3);
+      t.eq(ensureWorkflowsSeeded(db, FIXED_NOW), false, "no-op the second time");
+      for (const w of listWorkflows(db)) deleteWorkflow(db, w.id);
+      t.eq(ensureWorkflowsSeeded(db, FIXED_NOW), false, "a person who deleted them all is not re-seeded");
+      t.eq(listWorkflows(db).length, 0);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A2: a reset (seedDatabase) deletes executions, notes, assignments and user-made automations, and brings the seeds back", () => {
+    const db = openSeededMemoryDb();
+    try {
+      const [first] = listWorkflows(db);
+      const stamp = FIXED_NOW.toISOString();
+      db.prepare("INSERT INTO workflows (id, name, enabled, trigger_type, graph, created_at, updated_at) VALUES ('mine', 'Mine', 0, 'run_finished', '{}', ?, ?)").run(stamp, stamp);
+      t.eq(insertExecution(db, execRow({ id: "x1", workflow_id: first.id, trigger_key: "run:r1", run_id: "r1" })), true);
+      writeStep(db, { execution_id: "x1", node_id: "start", idx: 0, type: "trigger.run_finished", name: "s", status: "success", chosen_output: "out", output: "{}", error: null, attempts: 0, started_at: stamp, finished_at: stamp });
+      addNote(db, { id: "n1", run_id: "r1", execution_id: "x1", workflow_name: "W", text: "hi", created_at: stamp });
+      assignRun(db, { run_id: "r1", assignee: "AP lead", execution_id: "x1", workflow_name: "W", created_at: stamp });
+      seedDatabase(db);
+      const after = listWorkflows(db);
+      t.eq(after.map((w) => w.seed_key), ["route-holds", "chat-rejections", "daily-holds"], "only the seeds");
+      t.ok(getWorkflow(db, "mine") === null, "the user-made automation is gone");
+      for (const table of ["workflow_executions", "workflow_execution_steps", "run_notes", "run_assignments"]) t.eq(db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get(), 0, table);
+      t.eq(after.map((w) => w.enabled), [1, 0, 0]);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A2: saveWorkflow needs the current version; a wrong one is refused, a missing automation is not_found", () => {
+    const db = openSeededMemoryDb();
+    try {
+      const w = listWorkflows(db)[0];
+      const input = { name: "Renamed", graph: w.graph, secrets: "{}", triggerType: "run_finished", enabled: true, enabledAt: w.enabled_at, now: "2026-11-03T10:00:00.000Z" };
+      t.eq(saveWorkflow(db, w.id, { ...input, expectedVersion: 5 }), { ok: false, reason: "version" });
+      t.eq(saveWorkflow(db, "nope", { ...input, expectedVersion: 1 }), { ok: false, reason: "not_found" });
+      t.eq(saveWorkflow(db, w.id, { ...input, expectedVersion: 1 }), { ok: true, version: 2 });
+      t.eq(saveWorkflow(db, w.id, { ...input, expectedVersion: 1 }), { ok: false, reason: "version" }, "the same version twice");
+      const saved = getWorkflow(db, w.id);
+      t.eq([saved?.name, saved?.version, saved?.updated_at], ["Renamed", 2, "2026-11-03T10:00:00.000Z"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A2: setEnabled stamps enabled_at only when turning on; deleteWorkflow removes executions and steps but keeps notes and assignments", () => {
+    const db = openSeededMemoryDb();
+    try {
+      const w = listWorkflows(db)[1];
+      t.eq(setEnabled(db, w.id, true, "2026-11-03T08:00:00.000Z"), true);
+      t.eq([getWorkflow(db, w.id)?.enabled, getWorkflow(db, w.id)?.enabled_at], [1, "2026-11-03T08:00:00.000Z"]);
+      t.eq(setEnabled(db, w.id, false, "2026-11-03T09:00:00.000Z"), true);
+      t.eq([getWorkflow(db, w.id)?.enabled, getWorkflow(db, w.id)?.enabled_at], [0, "2026-11-03T08:00:00.000Z"], "turning off keeps the old stamp");
+      t.eq(setEnabled(db, "nope", true, "x"), false);
+      insertExecution(db, execRow({ id: "x1", workflow_id: w.id, trigger_key: "run:r1", run_id: "r1" }));
+      writeStep(db, { execution_id: "x1", node_id: "start", idx: 0, type: "trigger.run_finished", name: "s", status: "success", chosen_output: "out", output: null, error: null, attempts: 0, started_at: null, finished_at: null });
+      addNote(db, { id: "n1", run_id: "r1", execution_id: "x1", workflow_name: "W", text: "kept", created_at: FIXED_NOW.toISOString() });
+      assignRun(db, { run_id: "r1", assignee: "AP clerk", execution_id: "x1", workflow_name: "W", created_at: FIXED_NOW.toISOString() });
+      t.eq(deleteWorkflow(db, w.id), true);
+      t.eq([db.prepare("SELECT COUNT(*) FROM workflow_executions").pluck().get(), db.prepare("SELECT COUNT(*) FROM workflow_execution_steps").pluck().get()], [0, 0]);
+      t.eq([db.prepare("SELECT COUNT(*) FROM run_notes").pluck().get(), db.prepare("SELECT COUNT(*) FROM run_assignments").pluck().get()], [1, 1], "they record what happened");
+      t.eq(deleteWorkflow(db, w.id), false, "already gone");
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A2: insertExecution is idempotent on (workflow, trigger key); a claim succeeds once; finishing and reading back", () => {
+    const db = openSeededMemoryDb();
+    try {
+      const w = listWorkflows(db)[0];
+      t.eq(insertExecution(db, execRow({ id: "a", workflow_id: w.id, trigger_key: "run:r1", run_id: "r1" })), true);
+      t.eq(insertExecution(db, execRow({ id: "b", workflow_id: w.id, trigger_key: "run:r1", run_id: "r1" })), false, "the same invoice twice");
+      t.eq(insertExecution(db, execRow({ id: "c", workflow_id: listWorkflows(db)[1].id, trigger_key: "run:r1", run_id: "r1" })), true, "another automation may run for it");
+      t.eq(claimExecution(db, "a", "2026-11-03T10:00:00.000Z"), true);
+      t.eq(claimExecution(db, "a", "2026-11-03T10:00:01.000Z"), false, "already running");
+      writeStep(db, { execution_id: "a", node_id: "n2", idx: 2, type: "action.note", name: "second", status: "success", chosen_output: "out", output: "{}", error: null, attempts: 0, started_at: null, finished_at: null });
+      writeStep(db, { execution_id: "a", node_id: "n1", idx: 1, type: "logic.if", name: "first", status: "success", chosen_output: "true", output: "{}", error: null, attempts: 0, started_at: null, finished_at: null });
+      finishExecution(db, "a", "success", null, "2026-11-03T10:00:02.000Z");
+      const got = getExecution(db, "a");
+      t.eq([got?.execution.status, got?.execution.started_at, got?.execution.finished_at], ["success", "2026-11-03T10:00:00.000Z", "2026-11-03T10:00:02.000Z"]);
+      t.eq(got?.steps.map((x) => x.node_id), ["n1", "n2"], "steps come back in idx order");
+      t.eq(getExecution(db, "zzz"), null);
+      t.eq(executionsForRun(db, "r1").map((x) => x.id), ["a", "c"]);
+      t.eq(listExecutions(db, w.id, 10).map((x) => x.id), ["a"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A2: pruning keeps the newest executions of one automation (and deletes their steps), others are untouched", () => {
+    const db = openSeededMemoryDb();
+    const real = CONFIG.automationKeepExecutions;
+    try {
+      (CONFIG as { automationKeepExecutions: number }).automationKeepExecutions = 3;
+      const [a, b] = listWorkflows(db);
+      for (let i = 1; i <= 5; i++) {
+        insertExecution(db, execRow({ id: `a${i}`, workflow_id: a.id, trigger_key: `run:${i}`, created_at: `2026-11-03T10:00:0${i}.000Z` }));
+        writeStep(db, { execution_id: `a${i}`, node_id: "start", idx: 0, type: "trigger.run_finished", name: "s", status: "success", chosen_output: "out", output: null, error: null, attempts: 0, started_at: null, finished_at: null });
+      }
+      insertExecution(db, execRow({ id: "b1", workflow_id: b.id, trigger_key: "run:1" }));
+      t.eq(listExecutions(db, a.id, 10).map((x) => x.id), ["a5", "a4", "a3"], "3 remain, the newest");
+      t.eq(db.prepare("SELECT execution_id FROM workflow_execution_steps ORDER BY execution_id").pluck().all(), ["a3", "a4", "a5"], "no orphaned steps");
+      t.eq(listExecutions(db, b.id, 10).length, 1, "another automation is untouched");
+    } finally {
+      (CONFIG as { automationKeepExecutions: number }).automationKeepExecutions = real;
+      db.close();
+    }
+  });
+
+  await t.test("A2: the hourly counters count executions since a time, and every send attempt of webhook and chat steps", () => {
+    const db = openSeededMemoryDb();
+    try {
+      const w = listWorkflows(db)[0];
+      insertExecution(db, execRow({ id: "e1", workflow_id: w.id, trigger_key: "k1", created_at: "2026-11-03T09:00:00.000Z" }));
+      insertExecution(db, execRow({ id: "e2", workflow_id: w.id, trigger_key: "k2", created_at: "2026-11-03T10:30:00.000Z" }));
+      t.eq([countExecutionsSince(db, "2026-11-03T10:00:00.000Z"), countExecutionsSince(db, "2026-11-03T08:00:00.000Z")], [1, 2]);
+      const step = (node: string, type: string, attempts: number, at: string) => writeStep(db, { execution_id: "e2", node_id: node, idx: 0, type, name: node, status: "success", chosen_output: "out", output: null, error: null, attempts, started_at: at, finished_at: at });
+      step("c1", "action.chat", 3, "2026-11-03T10:31:00.000Z");
+      step("w1", "action.webhook", 1, "2026-11-03T10:32:00.000Z");
+      step("old", "action.chat", 2, "2026-11-03T08:00:00.000Z");
+      step("note", "action.note", 0, "2026-11-03T10:33:00.000Z");
+      t.eq(countSendsSince(db, "2026-11-03T10:00:00.000Z"), 4, "3 + 1; the old one and the note do not count");
+      t.eq(countSendsSince(db, "2026-11-03T12:00:00.000Z"), 0);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A2: startup recovery turns a queued or running execution into an error and leaves finished ones alone", () => {
+    const db = openDb(":memory:");
+    try {
+      insertSeedWorkflows(db, FIXED_NOW.toISOString());
+      const w = listWorkflows(db)[0];
+      for (const [id, status] of [["q", "queued"], ["r", "running"], ["s", "success"], ["e", "error"]] as const) insertExecution(db, execRow({ id, workflow_id: w.id, trigger_key: id, status }));
+      t.eq(recoverInterruptedExecutions(db, FIXED_NOW), 2);
+      const rows = ["q", "r", "s", "e"].map((id) => getExecution(db, id)?.execution);
+      t.eq(rows.map((x) => [x?.status, x?.error]), [["error", "Interrupted by restart."], ["error", "Interrupted by restart."], ["success", null], ["error", null]]);
+      t.eq(rows[0]?.finished_at, FIXED_NOW.toISOString());
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A2: maskUrl shows the host and the last 4 characters of a long path; parseSecrets never throws", () => {
+    t.eq(maskUrl("https://hooks.slack.com/services/T000/B000/XXXXabcd"), "hooks.slack.com/…/abcd");
+    t.eq(maskUrl("https://hooks.example.com/T000/B000/a1b2"), "hooks.example.com/…/a1b2");
+    t.eq(maskUrl("https://hooks.example.com/a1b2"), "hooks.example.com", "a short path shows only the host");
+    t.eq(maskUrl("https://hooks.example.com"), "hooks.example.com");
+    t.eq(maskUrl("not a url"), "(not a valid URL)");
+    t.ok(!maskUrl("https://hooks.slack.com/services/T000/B000/XXXXabcd").includes("services"), "nothing of the middle of the path");
+    t.eq(parseSecrets('{"chat":{"url":"https://x.example/abc","signing_secret":"s3"},"bad":5,"empty":{"url":""}}'), { chat: { url: "https://x.example/abc", signing_secret: "s3" } });
+    t.eq([parseSecrets("{nope"), parseSecrets("[]"), parseSecrets("null"), parseSecrets("{}")], [{}, {}, {}, {}]);
+  });
+
+  await t.test("A2: the graph limits equal the configured limits", () => {
+    t.eq([GRAPH_MAX_NODES, GRAPH_MAX_EDGES], [CONFIG.automationMaxNodes, CONFIG.automationMaxEdges]);
   });
 }
