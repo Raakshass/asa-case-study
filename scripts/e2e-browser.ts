@@ -42,7 +42,7 @@ const SHOTS = process.env.E2E_SHOTS ?? path.join(os.tmpdir(), "e2e-browser-shots
 const DATA_DIR = process.env.E2E_DATA_DIR ?? "";
 const PASSES = Math.max(1, Number.parseInt(process.env.E2E_PASSES ?? "2", 10) || 2);
 const RUN_TIMEOUT_MS = 60_000;
-const SECTIONS = ["reset", "samples", "dashboard", "data", "narrow", "keyboard", "unhappy", "xss", "review"] as const;
+const SECTIONS = ["reset", "samples", "dashboard", "data", "narrow", "keyboard", "unhappy", "xss", "automations", "review"] as const;
 type Section = (typeof SECTIONS)[number];
 
 /* ================================================================================================
@@ -548,11 +548,17 @@ async function sectionNarrow(): Promise<void> {
   const runs = (await (await page.request.get(`${BASE}/api/runs?limit=200`)).json()) as { runs: { id: string; file_name: string | null }[] };
   const nine = runs.runs.find((r) => r.file_name === "09-prompt-injection.pdf");
   const five = runs.runs.find((r) => r.file_name === "05-scanned-no-po.pdf");
+  // Automations (plan A13): the seed's id comes from the API, so a missing seed is itself a failing check
+  const autos = (await (await page.request.get(`${BASE}/api/automations`)).json()) as { automations: { id: string; seed_key: string | null }[] };
+  const routeHolds = autos.automations.find((a) => a.seed_key === "route-holds");
+  await check("narrow", "the route-holds seed automation exists", async () => ok(routeHolds !== undefined, "no automation with seed_key route-holds"));
   const targets: [string, string, string?][] = [
     ["dashboard", "/"],
     ["start page", "/runs/new"],
     ["run view (#9, the longest)", nine ? `/runs/${nine.id}` : "/runs/new"],
     ["data page", "/data"],
+    ["automations list", "/automations", "narrow-automations"],
+    ...(routeHolds ? ([["automation editor", `/automations/${routeHolds.id}`, "narrow-automation-editor"]] as [string, string, string][]) : []),
     // fix round UI-5: the decision card's "Also noted" list (only #5 has one among the samples)
     ["run view (#5, a cause and an 'Also noted' note)", five ? `/runs/${five.id}` : "/runs/new", "narrow-run-05"],
   ];
@@ -564,6 +570,10 @@ async function sectionNarrow(): Promise<void> {
         await decisionCard(page).waitFor();
         await page.getByRole("button", { name: "Expand all" }).click(); // the widest state of the run view
         await page.waitForTimeout(300);
+      }
+      if (url.startsWith("/automations/")) {
+        await page.getByText("The canvas opens on wider screens").waitFor();
+        eq(await page.locator(".react-flow").count(), 0, "no canvas at 375 px");
       }
       const { scrollWidth, clientWidth } = await pageScroll(page);
       ok(scrollWidth <= clientWidth, `page is ${scrollWidth} px wide in a ${clientWidth} px viewport`);
@@ -959,6 +969,113 @@ const HOSTILE = {
   bidi: "‮fdp.exe​‍ INVOICE ⁧RTL⁩ فاتورة",
 };
 
+/** Automations (plan A13): the list, the editor (canvas and Steps view), undo and redo, save, a test with a past invoice, the run page. */
+async function sectionAutomations(page: Page): Promise<void> {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  let routeId = "";
+  const askToken = async () => {
+    // in a full run the token is usually stored already (the reset used the same tab): the prompt may not appear
+    const prompt = page.getByLabel("Operator token");
+    if (await prompt.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await prompt.fill(TOKEN);
+      await page.getByRole("button", { name: "Continue" }).click();
+    }
+  };
+  await check("automations", "the list shows the three seed automations; 'Route holds to the right person' is On", async () => {
+    takeProblems(page);
+    await page.goto(`${BASE}/automations`);
+    await page.locator("table tbody tr").first().waitFor();
+    eq(await page.locator("table tbody tr").count(), 3, "three rows");
+    const row = page.locator("table tbody tr").filter({ hasText: "Route holds to the right person" });
+    has(await row.innerText(), "On", "the first seed is on");
+    eq(await page.locator('[role="button"]:not(button)').count(), 0, "role=button on something that is not a <button>");
+    const href = await row.getByRole("link", { name: "Route holds to the right person" }).getAttribute("href");
+    routeId = (href ?? "").split("/").pop() ?? "";
+    ok(/^[0-9a-f-]{36}$/.test(routeId), `the row links to the editor (${href})`);
+    await shot(page, "automations-list");
+  });
+  await check("automations", "the editor draws 7 steps on the canvas with Yes and No outputs, and the same 7 in the Steps view", async () => {
+    await page.goto(`${BASE}/automations/${routeId}`);
+    await page.locator(".react-flow__node").first().waitFor();
+    eq(await page.locator(".react-flow__node").count(), 7, "seven steps on the canvas");
+    const canvasText = await page.locator(".react-flow").innerText();
+    has(canvasText, "Yes", "an output labelled Yes");
+    has(canvasText, "No", "an output labelled No");
+    eq(await page.locator('[role="button"]:not(button)').count(), 0, "role=button on something that is not a <button> (canvas view)");
+    await page.getByRole("button", { name: "Steps", exact: true }).click();
+    await page.locator("ol[data-steps-list]").waitFor();
+    eq(await page.locator("ol[data-steps-list] > li[data-step-row]").count(), 7, "seven steps in the list");
+    await shot(page, "automation-editor-steps");
+    await page.getByRole("button", { name: "Canvas", exact: true }).click();
+    await page.locator(".react-flow__node").first().waitFor();
+    await page.waitForTimeout(1200); // the fit-to-view animation, on a busy machine
+    await shot(page, "automation-editor-canvas");
+  });
+  await check("automations", "editing: change a step's setting, undo and redo with the buttons, save", async () => {
+    await page.locator(".react-flow__node").filter({ hasText: "Assign to AP lead" }).first().click();
+    const assignee = page.getByLabel("Assign to", { exact: true });
+    await assignee.waitFor();
+    eq(await assignee.inputValue(), "AP lead", "the step starts as the seed made it");
+    await assignee.fill("AP lead (Sam)");
+    await assignee.press("Tab");
+    await page.waitForTimeout(500); // the 400 ms undo step
+    ok(await page.getByRole("button", { name: "Save", exact: true }).isEnabled(), "Save is enabled once something changed");
+    await page.getByRole("button", { name: "Undo", exact: true }).click(); // the button, not the shortcut: shortcuts are ignored while a field has focus
+    eq(await assignee.inputValue(), "AP lead", "undo");
+    await page.getByRole("button", { name: "Redo", exact: true }).click();
+    eq(await assignee.inputValue(), "AP lead (Sam)", "redo");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await askToken();
+    await page.getByText(/^Saved/).first().waitFor();
+  });
+  await check("automations", "Test with an invoice: sample 3's run, the History panel shows Succeeded, 'Not written (test).' and what would be assigned", async () => {
+    await page.getByRole("button", { name: "Test with an invoice" }).click();
+    const dialog = page.getByRole("dialog");
+    const select = dialog.getByLabel("Invoice");
+    await select.waitFor();
+    const value = await select.locator("option", { hasText: "GLX-303" }).first().getAttribute("value");
+    ok(value, "an option for sample 3 (GLX-303)");
+    await select.selectOption(value as string);
+    await dialog.getByRole("button", { name: "Run test" }).click();
+    await askToken();
+    await page.getByText("Succeeded").first().waitFor();
+    const text = await page.locator("main").innerText();
+    has(text, "Not written (test).", "a test writes nothing");
+    has(text, '"would_assign": "AP lead (Sam)"', "what would have been assigned");
+    await shot(page, "automation-history-overlay");
+    await page.getByRole("button", { name: "Back to editing" }).click();
+  });
+  await check("automations", "Steps view: Add after, After No, Add a note: focus lands on the new step's Edit button, the problem is named, Undo restores", async () => {
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: "Steps", exact: true }).click();
+    await page.locator("ol[data-steps-list]").waitFor();
+    const row = page.locator('li[data-step-row="if-security"]');
+    await row.locator("summary", { hasText: "Add after" }).click();
+    await row.locator("summary", { hasText: "After No" }).click();
+    await row.getByRole("button", { name: "Add a note to the invoice" }).click();
+    await page.locator('li[data-step-row="note-1"]').waitFor();
+    await page.waitForFunction(() => document.activeElement?.getAttribute("data-edit") === "note-1", undefined, { timeout: 5000 }).catch(() => undefined);
+    eq(await page.evaluate(() => document.activeElement?.getAttribute("data-edit")), "note-1", "focus is on the new step's Edit button");
+    await page.getByText("Write the note's text.").first().waitFor();
+    await page.getByRole("button", { name: "1 problem" }).waitFor();
+    await page.getByRole("button", { name: "Undo", exact: true }).click();
+    eq(await page.locator('li[data-step-row="note-1"]').count(), 0, "undo removed the new step (it is not saved)");
+  });
+  await check("automations", "sample 3's run page lists the automation that ran for it, with 'Assigned to AP lead'", async () => {
+    const runs = (await (await page.request.get(`${BASE}/api/runs?limit=200`)).json()) as { runs: { id: string; file_name: string | null }[] };
+    const three = runs.runs.find((r) => r.file_name === "03-split-po-overbill.pdf");
+    ok(three, "a run of #3 exists");
+    await page.goto(`${BASE}/runs/${three?.id}`, { waitUntil: "domcontentloaded" });
+    await decisionCard(page).waitFor();
+    await page.getByText("Assigned to AP lead").waitFor({ timeout: 10_000 });
+    has(await page.getByRole("heading", { name: "Automations" }).innerText(), "Automations", "the section's heading");
+    const one = runs.runs.find((r) => r.file_name === "01-happy-northwind.pdf");
+    await page.goto(`${BASE}/runs/${one?.id}`, { waitUntil: "domcontentloaded" });
+    await page.getByText("No automation ran for this invoice.").waitFor({ timeout: 10_000 });
+    eq(takeProblems(page), [], "browser console and network");
+  });
+}
+
 /** Review round B4: a person resolves sample 5's hold in the browser (approve, PO-1005) and the page, the PO balance and the stamp follow. */
 async function sectionReview(page: Page): Promise<void> {
   await check("review", "resolve sample 5's hold: approve after review with PO-1005; the stamp, the PO balance and the page follow", async () => {
@@ -1154,6 +1271,7 @@ async function main(): Promise<number> {
     if (run("keyboard")) await sectionKeyboard(page);
     if (run("unhappy")) await sectionUnhappy();
     if (run("xss")) await sectionXss();
+    if (run("automations")) await sectionAutomations(page);
     if (run("review")) await sectionReview(page); // last: it changes the counts the sections above assert
     await ctx.close();
   } finally {
