@@ -15,7 +15,7 @@ const node = (id: string, type: NodeType, name: string, x: number, y: number, co
   position: { x, y },
   config: (config ?? NODE_SPECS[type].defaultConfig()) as Record<string, unknown>,
 });
-const edge = (source: string, sourceHandle: string, target: string): GraphEdge => ({ id: `${source}-${sourceHandle}-${target}`, source, sourceHandle, target });
+const edge = (source: string, sourceHandle: string, target: string): GraphEdge => ({ id: `${source}-${sourceHandle.toLowerCase()}-${target}`, source, sourceHandle, target });
 
 export interface SeedWorkflow {
   seed_key: string;

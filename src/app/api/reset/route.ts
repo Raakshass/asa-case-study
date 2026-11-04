@@ -5,6 +5,7 @@
  * rate limiter, so the endpoint cannot be used to get around it.
  */
 import { CONFIG, ENV } from "@/lib/config";
+import { bumpAutomationGeneration, pauseAutomations } from "@/lib/automations/engine";
 import { getDb } from "@/lib/db";
 import { runExclusive, whenIdle } from "@/lib/pipeline";
 import { seedDatabase } from "@/lib/seed";
@@ -41,14 +42,21 @@ async function idleOrWaited(): Promise<void> {
 export async function POST(req: Request): Promise<Response> {
   try {
     if (!resetAllowed(req)) return apiError(403, "Reset is not allowed.");
-    await idleOrWaited(); // a run in flight finishes first (and runs enqueued meanwhile, for a bounded time)
-    // The wipe takes its turn on the pipeline's own chain, so a run enqueued meanwhile cannot start in the middle of it.
-    const counts = await runExclusive(async () => {
-      const seeded = seedDatabase(getDb());
-      await wipeUploads();
-      return seeded;
-    });
-    return json({ ok: true, counts } satisfies ResetResponse);
+    // Automations pause first (no new execution is recorded) and get the same bounded wait; resume in the finally.
+    const resume = await pauseAutomations(CONFIG.resetIdleWaitMs);
+    try {
+      await idleOrWaited(); // a run in flight finishes first (and runs enqueued meanwhile, for a bounded time)
+      // The wipe takes its turn on the pipeline's own chain, so a run enqueued meanwhile cannot start in the middle of it.
+      const counts = await runExclusive(async () => {
+        bumpAutomationGeneration(); // an execution still running stops without writing: its rows are about to be deleted
+        const seeded = seedDatabase(getDb());
+        await wipeUploads();
+        return seeded;
+      });
+      return json({ ok: true, counts } satisfies ResetResponse);
+    } finally {
+      resume();
+    }
   } catch (e) {
     return serverError("POST /api/reset", e);
   }

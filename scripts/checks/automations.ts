@@ -17,6 +17,8 @@ import {
   insertExecution,
   listExecutions,
   listWorkflows,
+  notesForRun,
+  assignmentForRun,
   maskUrl,
   parseSecrets,
   saveWorkflow,
@@ -24,7 +26,21 @@ import {
   writeStep,
   type ExecutionRow,
 } from "../../src/lib/automations/store";
+import { EventEmitter } from "node:events";
+import type https from "node:https";
+import crypto from "node:crypto";
+import {
+  automationsIdle,
+  bumpAutomationGeneration,
+  dispatchRunFinished,
+  pauseAutomations,
+  startTestExecution,
+  type AutomationDeps,
+} from "../../src/lib/automations/engine";
+import { hostAllowed, isBlockedAddress, sendHttps, signPayload, type OutboundRequest, type OutboundResponse } from "../../src/lib/automations/send";
+import { buildRunVars, buildSummaryVars } from "../../src/lib/automations/vars";
 import { CONFIG } from "../../src/lib/config";
+import type { DB } from "../../src/lib/db";
 import { openDb, recoverInterruptedExecutions } from "../../src/lib/db";
 import { seedDatabase } from "../../src/lib/seed";
 import { formatUsd } from "../../src/lib/format";
@@ -59,7 +75,7 @@ const node = (id: string, type: NodeType, name: string, x: number, y: number, co
   position: { x, y },
   config: (config ?? NODE_SPECS[type].defaultConfig()) as Record<string, unknown>,
 });
-const edge = (source: string, sourceHandle: string, target: string): GraphEdge => ({ id: `${source}-${sourceHandle}-${target}`, source, sourceHandle, target });
+const edge = (source: string, sourceHandle: string, target: string): GraphEdge => ({ id: `${source}-${sourceHandle.toLowerCase()}-${target}`, source, sourceHandle, target });
 const graphOf = (nodes: GraphNode[], edges: GraphEdge[]): Graph => ({ nodes, edges });
 const messages = (g: unknown, opts?: Parameters<typeof validateGraph>[1]): string[] => validateGraph(g, opts).problems.map((p) => p.message);
 
@@ -88,6 +104,132 @@ const execRow = (over: Partial<ExecutionRow> & Pick<ExecutionRow, "id" | "workfl
   finished_at: null,
   ...over,
 });
+
+/* ---- helpers for the engine and sender tests ---- */
+
+interface RunSeed {
+  id: string;
+  decision: "APPROVE" | "HOLD" | "REJECT" | null;
+  status?: string;
+  reasons?: string[];
+  security?: boolean;
+  total?: number | null;
+  vendorId?: string | null;
+  invoiceNumber?: string | null;
+  poNumber?: string | null;
+  finishedAt?: string;
+  vendorName?: string | null;
+  bankMismatch?: boolean;
+}
+/** A finished run and its invoice row, written the way the pipeline writes them (just what the engine reads). */
+function addRun(db: DB, o: RunSeed): string {
+  const at = o.finishedAt ?? FIXED_NOW.toISOString();
+  const extraction = { vendor_name: o.vendorName === undefined ? "Globex Logistics Ltd" : o.vendorName, invoice_number: o.invoiceNumber ?? null, total: o.total ?? null };
+  db.prepare(
+    "INSERT INTO runs (id, file_name, file_hash, status, decision, decision_reasons, next_action, security_flag, extraction, model, created_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'mock', ?, ?)",
+  ).run(o.id, `${o.id}.pdf`, null, o.status ?? "done", o.decision, JSON.stringify(o.reasons ?? ["A reason."]), "Do the next thing.", o.security ? 1 : 0, JSON.stringify(extraction), at, at);
+  if (o.decision !== null) {
+    db.prepare(
+      "INSERT INTO invoices (id, run_id, vendor_id, invoice_number, invoice_number_norm, invoice_date, po_number, po_inferred, subtotal, tax, total, currency, decision, created_at) VALUES (?, ?, ?, ?, ?, '2026-10-30', ?, 0, ?, 0, ?, 'USD', ?, ?)",
+    ).run(o.id, o.id, o.vendorId === undefined ? "V003" : o.vendorId, o.invoiceNumber ?? null, o.invoiceNumber?.replace(/[^A-Z0-9]/g, "") ?? null, o.poNumber ?? null, o.total ?? null, o.total ?? null, o.decision, at);
+  }
+  if (o.bankMismatch) {
+    db.prepare("INSERT INTO run_steps (run_id, idx, key, label, status, severity, reason, detail) VALUES (?, 6, 'vendor', 'Vendor check', 'fail', 'hold', 'x', ?)").run(o.id, JSON.stringify({ bank_mismatch: true }));
+  }
+  return o.id;
+}
+
+interface StubSender {
+  calls: { req: OutboundRequest; allowedHosts: readonly string[] }[];
+  send: AutomationDeps["send"];
+}
+/** A sender that records each call and answers from a queue (the last answer repeats). */
+function stubSender(...answers: Partial<OutboundResponse>[]): StubSender {
+  const calls: StubSender["calls"] = [];
+  const queue = [...answers];
+  return {
+    calls,
+    send: (req, allowedHosts) => {
+      calls.push({ req, allowedHosts });
+      const next = queue.length > 1 ? (queue.shift() as Partial<OutboundResponse>) : (queue[0] ?? {});
+      return Promise.resolve({ ok: true, status: 200, bodyText: "ok", error: null, retryable: false, ...next });
+    },
+  };
+}
+
+function depsFor(db: DB, over: Partial<AutomationDeps> = {}): AutomationDeps & { sleeps: number[] } {
+  const sleeps: number[] = [];
+  return {
+    db,
+    now: () => FIXED_NOW,
+    send: stubSender().send,
+    allowedHosts: ["hooks.example.com"],
+    baseUrl: null,
+    sleep: (ms) => {
+      sleeps.push(ms);
+      return Promise.resolve();
+    },
+    reviewTrigger: true,
+    ...over,
+    sleeps,
+  };
+}
+
+/** Sets the secret URL of one step of an automation (the editor's save does this through the API). */
+function setUrl(db: DB, workflowId: string, nodeId: string, url: string | null, signingSecret?: string): void {
+  db.prepare("UPDATE workflows SET secrets = ? WHERE id = ?").run(JSON.stringify(url === null ? {} : { [nodeId]: { url, ...(signingSecret ? { signing_secret: signingSecret } : {}) } }), workflowId);
+}
+const workflowBySeed = (db: DB, key: string) => listWorkflows(db).find((w) => w.seed_key === key) as ReturnType<typeof listWorkflows>[number];
+const stepsOf = (db: DB, executionId: string) => getExecution(db, executionId)?.steps ?? [];
+const only = <T,>(list: T[], what: string): T => {
+  if (list.length !== 1) throw new Error(`expected one ${what}, got ${list.length}`);
+  return list[0];
+};
+
+/** A fake of https.request: records its options and answers as scripted. */
+interface FakeScript {
+  status?: number;
+  body?: string;
+  neverEnds?: boolean;
+  networkError?: boolean;
+  bodyBytes?: number;
+}
+function fakeHttps(script: FakeScript = {}) {
+  const calls: { options: Record<string, unknown>; written: string[]; destroyedWith: unknown[] }[] = [];
+  const request = ((options: Record<string, unknown>, cb: (res: EventEmitter & { statusCode?: number; destroy(): void }) => void) => {
+    const record = { options, written: [] as string[], destroyedWith: [] as unknown[] };
+    calls.push(record);
+    const req = new EventEmitter() as EventEmitter & { end(b?: string): void; destroy(e?: unknown): void };
+    req.end = (b?: string) => {
+      if (b) record.written.push(b);
+      process.nextTick(() => {
+        if (script.networkError) {
+          req.emit("error", new Error("getaddrinfo ENOTFOUND secret.example.com"));
+          return;
+        }
+        const res = new EventEmitter() as EventEmitter & { statusCode?: number; destroy(): void };
+        res.statusCode = script.status ?? 200;
+        res.destroy = () => undefined;
+        cb(res);
+        if (script.neverEnds) return;
+        if (script.bodyBytes !== undefined) res.emit("data", Buffer.alloc(script.bodyBytes, "a"));
+        else res.emit("data", Buffer.from(script.body ?? "ok"));
+        res.emit("end");
+      });
+    };
+    req.destroy = (e?: unknown) => {
+      record.destroyedWith.push(e);
+      process.nextTick(() => req.emit("error", e ?? new Error("destroyed")));
+    };
+    return req;
+  }) as unknown as typeof https.request;
+  return { request, calls };
+}
+const publicResolve = (addresses: { address: string; family: number }[] = [{ address: "8.8.8.8", family: 4 }]) => {
+  const calls: string[] = [];
+  return { calls, resolve: (host: string) => (calls.push(host), Promise.resolve(addresses)) };
+};
+const outbound = (url: string, over: Partial<OutboundRequest> = {}): OutboundRequest => ({ url, body: '{"text":"hi"}', signingSecret: null, now: new Date(1_700_000_000_000), ...over });
 
 export async function run(t: Check): Promise<void> {
   await t.test("A1: the three seed graphs validate with no problems", () => {
@@ -533,5 +675,600 @@ export async function run(t: Check): Promise<void> {
 
   await t.test("A2: the graph limits equal the configured limits", () => {
     t.eq([GRAPH_MAX_NODES, GRAPH_MAX_EDGES], [CONFIG.automationMaxNodes, CONFIG.automationMaxEdges]);
+  });
+
+  /* ---------------------------------------------------------------------------- A4: engine and variables */
+
+  await t.test("A4: the first seed assigns each hold to the right person: security, large, the rest (and a null total counts as not large)", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      const deps = depsFor(db);
+      const cases: [string, RunSeed, string, boolean][] = [
+        ["lead", { id: "r-lead", decision: "HOLD", total: 9900, invoiceNumber: "GLX-303" }, "AP lead", false],
+        ["clerk", { id: "r-clerk", decision: "HOLD", total: 1650, invoiceNumber: "IF-2210" }, "AP clerk", false],
+        ["security", { id: "r-sec", decision: "HOLD", total: 4620, security: true, reasons: ["Hidden instruction quoted."] }, "Finance security", true],
+        ["no total", { id: "r-none", decision: "HOLD", total: null }, "AP clerk", false],
+      ];
+      for (const [, seed] of cases) addRun(db, seed);
+      for (const [, seed] of cases) dispatchRunFinished(deps, seed.id);
+      await automationsIdle();
+      for (const [name, seed, assignee, noted] of cases) {
+        const ex = only(executionsForRun(db, seed.id), `execution for ${name}`);
+        t.eq([ex.status, ex.error, ex.mode, ex.trigger_key], ["success", null, "live", `run:${seed.id}`], name);
+        t.eq(assignmentForRun(db, seed.id)?.assignee, assignee, name);
+        const notes = notesForRun(db, seed.id);
+        t.eq(notes.length, noted ? 1 : 0, `${name}: notes`);
+        if (noted) t.eq(notes[0].text, "Security review needed before any payment: Hidden instruction quoted.");
+      }
+      for (const [id, decision] of [["r-ok", "APPROVE"], ["r-no", "REJECT"]] as const) {
+        addRun(db, { id, decision, total: 100 });
+        dispatchRunFinished(deps, id);
+      }
+      await automationsIdle();
+      t.eq([executionsForRun(db, "r-ok").length, executionsForRun(db, "r-no").length], [0, 0], "an approved or rejected run starts nothing (seed 2 is off)");
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: dispatching the same run twice starts it once; skipped steps are recorded; each step keeps its chosen output and output", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      const deps = depsFor(db);
+      addRun(db, { id: "r1", decision: "HOLD", total: 9900 });
+      dispatchRunFinished(deps, "r1");
+      dispatchRunFinished(deps, "r1");
+      await automationsIdle();
+      const ex = only(executionsForRun(db, "r1"), "execution");
+      const steps = stepsOf(db, ex.id);
+      t.eq(steps.map((x) => [x.node_id, x.status, x.chosen_output]), [
+        ["start", "success", "out"],
+        ["if-security", "success", "false"],
+        ["assign-security", "skipped", null],
+        ["note-security", "skipped", null],
+        ["if-large", "success", "true"],
+        ["assign-lead", "success", "out"],
+        ["assign-clerk", "skipped", null],
+      ], "in topological order, the untaken branch skipped");
+      const ifStep = steps.find((x) => x.node_id === "if-large");
+      t.eq(JSON.parse(ifStep?.output ?? "null"), { result: true, checked: [{ field: "run.total", op: "gt", value: 5000, actual: "9900" }] }, "the condition's evidence");
+      t.eq(JSON.parse(steps.find((x) => x.node_id === "assign-lead")?.output ?? "null"), { assigned_to: "AP lead" });
+      t.eq(ex.workflow_name, "Route holds to the right person");
+      t.eq(JSON.parse(ex.vars)["workflow.name"], "Route holds to the right person");
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: buildRunVars reads the run: decision words, joined reasons, bank change, total, URL; a missing or history run is null", () => {
+    const db = openSeededMemoryDb();
+    try {
+      addRun(db, { id: "r1", decision: "HOLD", total: 9900, invoiceNumber: "GLX-303", poNumber: "PO-1003", reasons: ["First.", "Second."], bankMismatch: true });
+      const vars = buildRunVars(db, "r1", "https://ap.example.com", FIXED_NOW) as Vars;
+      t.eq(vars["run.url"], "https://ap.example.com/runs/r1");
+      t.eq([vars["run.decision"], vars["run.decision_text"], vars["run.first_reason"], vars["run.reasons"]], ["HOLD", "On hold", "First.", "First.; Second."]);
+      t.eq([vars["run.bank_change"], vars["run.total"], vars["run.invoice_number"], vars["run.po_number"], vars["run.vendor_name"], vars["run.vendor_id"]], [true, 9900, "GLX-303", "PO-1003", "Globex Logistics Ltd", "V003"]);
+      t.eq([vars["now.date"], vars["run.security_flag"], vars["run.po_inferred"]], ["2026-11-02", false, false]);
+      t.eq(buildRunVars(db, "r1", null, FIXED_NOW)?.["run.url"], "/runs/r1", "no base URL: a relative link");
+      t.eq(buildRunVars(db, "nope", null), null);
+      const history = db.prepare("SELECT id FROM runs WHERE model = 'history' LIMIT 1").pluck().get() as string;
+      t.eq(buildRunVars(db, history, null), null, "a pre-loaded history row is not a run to automate");
+      addRun(db, { id: "r-err", decision: null, status: "error" });
+      const err = buildRunVars(db, "r-err", null) as Vars;
+      t.eq([err["run.decision"], err["run.decision_text"], err["run.vendor_id"]], [null, "System error", null]);
+      addRun(db, { id: "r-long", decision: "HOLD", reasons: ["x".repeat(600)], vendorName: "v".repeat(500) });
+      const long = buildRunVars(db, "r-long", null) as Vars;
+      t.ok(String(long["run.first_reason"]).length <= 500 && String(long["run.vendor_name"]).length <= 200, "texts from the invoice are capped");
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: the split by decision takes the output named after the decision, and ERROR for a system error", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      const deps = depsFor(db);
+      const [seed] = listWorkflows(db);
+      const graph: Graph = {
+        nodes: [
+          node("start", "trigger.run_finished", "Start", 0, 0, { decisions: ["APPROVE", "HOLD", "REJECT"], include_errors: true }),
+          node("switch", "logic.switch_decision", "Split", 280, 0, {}),
+          node("a", "action.note", "Approved note", 560, -100, { text: "approved" }),
+          node("h", "action.note", "Hold note", 560, 0, { text: "held" }),
+          node("e", "action.note", "Error note", 560, 100, { text: "system error" }),
+        ],
+        edges: [edge("start", "out", "switch"), edge("switch", "APPROVE", "a"), edge("switch", "HOLD", "h"), edge("switch", "ERROR", "e")],
+      };
+      db.prepare("UPDATE workflows SET graph = ?, enabled = 1 WHERE id = ?").run(JSON.stringify(graph), seed.id);
+      db.prepare("UPDATE workflows SET enabled = 0 WHERE id != ?").run(seed.id);
+      addRun(db, { id: "ra", decision: "APPROVE" });
+      addRun(db, { id: "rh", decision: "HOLD" });
+      addRun(db, { id: "rr", decision: "REJECT" });
+      addRun(db, { id: "re", decision: null, status: "error" });
+      for (const id of ["ra", "rh", "rr", "re"]) dispatchRunFinished(deps, id);
+      await automationsIdle();
+      t.eq(["ra", "rh", "rr", "re"].map((id) => notesForRun(db, id).map((n) => n.text)), [["approved"], ["held"], [], ["system error"]], "REJECT has no output connected, so it just stops");
+      const switchStep = stepsOf(db, only(executionsForRun(db, "re"), "e").id).find((x) => x.node_id === "switch");
+      t.eq([switchStep?.chosen_output, JSON.parse(switchStep?.output ?? "null")], ["ERROR", { decision: "ERROR" }]);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: a trigger that does not list an outcome starts nothing; include_errors starts on a system error", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      const deps = depsFor(db);
+      addRun(db, { id: "rh", decision: "HOLD" });
+      addRun(db, { id: "re", decision: null, status: "error" });
+      dispatchRunFinished(deps, "re");
+      await automationsIdle();
+      t.eq(executionsForRun(db, "re").length, 0, "the seed lists only HOLD");
+      const seed = workflowBySeed(db, "route-holds");
+      const graph = JSON.parse(seed.graph) as Graph;
+      (graph.nodes[0].config as Record<string, unknown>).include_errors = true;
+      db.prepare("UPDATE workflows SET graph = ? WHERE id = ?").run(JSON.stringify(graph), seed.id);
+      dispatchRunFinished(deps, "re");
+      await automationsIdle();
+      const ex = only(executionsForRun(db, "re"), "execution");
+      t.eq(ex.status, "success", "it started, and the steps that need a decision still ran their own way");
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: a test execution writes no note or assignment, ignores enabled and the outcome filter, and shows what would be written", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      const deps = depsFor(db);
+      const off = workflowBySeed(db, "chat-rejections");
+      addRun(db, { id: "r4", decision: "REJECT", total: 400, invoiceNumber: "INV-0042" });
+      const started = startTestExecution(deps, off.id, "r4", false);
+      t.ok(started.ok, "a disabled automation can be tested");
+      await automationsIdle();
+      if (!started.ok) return;
+      const ex = getExecution(db, started.executionId)?.execution;
+      t.eq([ex?.status, ex?.mode, ex?.trigger_type, ex?.run_id, ex?.trigger_key.startsWith("test:")], ["success", "test", "test", "r4", true]);
+      // seed 1 (on) with a REJECT run: the filter says HOLD only, a test ignores it and writes nothing
+      const route = workflowBySeed(db, "route-holds");
+      const second = startTestExecution(deps, route.id, "r4", false);
+      await automationsIdle();
+      if (!second.ok) throw new Error("test did not start");
+      const steps = stepsOf(db, second.executionId);
+      t.eq(steps.map((x) => x.status), ["success", "success", "skipped", "skipped", "success", "skipped", "success"], "a REJECT run with a small total goes to the clerk");
+      t.eq(JSON.parse(steps.find((x) => x.node_id === "assign-clerk")?.output ?? "null"), { would_assign: "AP clerk" });
+      t.eq([notesForRun(db, "r4").length, assignmentForRun(db, "r4")], [0, null], "nothing written");
+      t.eq(executionsForRun(db, "r4").length, 2, "both tests are recorded");
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: startTestExecution refuses what cannot be tested, with fixed sentences", () => {
+    const db = openSeededMemoryDb();
+    try {
+      const deps = depsFor(db);
+      const route = workflowBySeed(db, "route-holds");
+      t.eq(startTestExecution(deps, "nope", null, false), { ok: false, status: 404, error: "Automation not found." });
+      t.eq(startTestExecution(deps, route.id, null, false), { ok: false, status: 400, error: "Choose a finished invoice to test with." });
+      t.eq(startTestExecution(deps, route.id, "ghost", false), { ok: false, status: 400, error: "Choose a finished invoice to test with." });
+      const history = db.prepare("SELECT id FROM runs WHERE model = 'history' LIMIT 1").pluck().get() as string;
+      t.eq(startTestExecution(deps, route.id, history, false), { ok: false, status: 400, error: "Choose a finished invoice to test with." }, "a history row");
+      db.prepare("INSERT INTO runs (id, status, created_at, model) VALUES ('queued-run', 'queued', ?, 'mock')").run(FIXED_NOW.toISOString());
+      t.eq(startTestExecution(deps, route.id, "queued-run", false).ok, false, "a run that has not finished");
+      db.prepare("UPDATE workflows SET graph = ? WHERE id = ?").run(JSON.stringify({ nodes: [], edges: [] }), route.id);
+      t.eq(startTestExecution(deps, route.id, null, false), { ok: false, status: 409, error: "Fix the problems listed before testing." });
+      db.prepare("UPDATE workflows SET graph = 'not json' WHERE id = ?").run(route.id);
+      t.eq(startTestExecution(deps, route.id, null, false), { ok: false, status: 409, error: "Fix the problems listed before testing." }, "an unreadable graph");
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: a test of a schedule automation ignores the run; a review trigger needs a reviewed run", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      const deps = depsFor(db);
+      const daily = workflowBySeed(db, "daily-holds");
+      addRun(db, { id: "h1", decision: "HOLD", total: 9900, invoiceNumber: "GLX-303", reasons: ["Exceeds remaining PO balance by $3,000.00."], finishedAt: "2026-11-02T08:00:00.000Z" });
+      const started = startTestExecution(deps, daily.id, "ignored", false);
+      await automationsIdle();
+      if (!started.ok) throw new Error("did not start");
+      const ex = getExecution(db, started.executionId);
+      t.eq([ex?.execution.run_id, ex?.execution.status], [null, "success"]);
+      const chat = ex?.steps.find((x) => x.node_id === "chat");
+      const preview = JSON.parse(chat?.output ?? "null").preview;
+      t.eq(preview.host, null, "no URL set yet: the preview says so");
+      t.ok(String(preview.body.text).startsWith("1 invoices on hold in the last 24 hours ($9,900.00):"), preview.body.text);
+      t.includes(preview.body.text, "GLX-303, Globex Logistics Ltd, $9,900.00: Exceeds remaining PO balance by $3,000.00.");
+      // a review trigger
+      const review: Graph = { nodes: [node("start", "trigger.review_saved", "Start", 0, 0, { actions: ["APPROVE"] }), node("note", "action.note", "Note", 280, 0, { text: "Approved after review: {{review.comment}}" })], edges: [edge("start", "out", "note")] };
+      const route = workflowBySeed(db, "route-holds");
+      db.prepare("UPDATE workflows SET graph = ?, trigger_type = 'review_saved' WHERE id = ?").run(JSON.stringify(review), route.id);
+      t.eq(startTestExecution(deps, route.id, "h1", false), { ok: false, status: 400, error: "That invoice has not been reviewed yet; choose one that has." });
+      db.prepare("INSERT INTO run_reviews (id, run_id, action, comment, po_number, previous_decision, created_at) VALUES ('rv', 'h1', 'APPROVE', 'Checked with the buyer.', NULL, 'HOLD', ?)").run(FIXED_NOW.toISOString());
+      const ok = startTestExecution(deps, route.id, "h1", false);
+      await automationsIdle();
+      if (!ok.ok) throw new Error("did not start");
+      t.eq(JSON.parse(stepsOf(db, ok.executionId).find((x) => x.node_id === "note")?.output ?? "null"), { would_write: "Approved after review: Checked with the buyer." });
+      t.eq(startTestExecution({ ...deps, reviewTrigger: false }, route.id, "h1", false), { ok: false, status: 409, error: "Fix the problems listed before testing." }, "without the review feature the trigger is a problem");
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: data steps: the vendor and PO lookups add values, and each failure has its own sentence", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      const deps = depsFor(db);
+      const route = workflowBySeed(db, "route-holds");
+      const graph: Graph = {
+        nodes: [
+          node("start", "trigger.run_finished", "Start", 0, 0, { decisions: ["HOLD"], include_errors: false }),
+          node("vendor", "data.vendor", "Vendor", 280, 0),
+          node("po", "data.po_balance", "PO", 560, 0),
+          node("note", "action.note", "Note", 840, 0, { text: "{{vendor.name}} approved={{vendor.approved}} {{po.number}} left {{po.remaining}} of {{po.subtotal}} ({{po.status}})" }),
+        ],
+        edges: [edge("start", "out", "vendor"), edge("vendor", "out", "po"), edge("po", "out", "note")],
+      };
+      db.prepare("UPDATE workflows SET graph = ? WHERE id = ?").run(JSON.stringify(graph), route.id);
+      addRun(db, { id: "ok", decision: "HOLD", poNumber: "PO-1003", vendorId: "V003" });
+      addRun(db, { id: "no-vendor", decision: "HOLD", vendorId: null, poNumber: "PO-1003" });
+      addRun(db, { id: "no-po", decision: "HOLD", vendorId: "V003", poNumber: null });
+      addRun(db, { id: "ghost-po", decision: "HOLD", vendorId: "V003", poNumber: "PO-9999" });
+      for (const id of ["ok", "no-vendor", "no-po", "ghost-po"]) dispatchRunFinished(deps, id);
+      await automationsIdle();
+      t.eq(notesForRun(db, "ok").map((n) => n.text), ["Globex Logistics Ltd approved=yes PO-1003 left $6,000.00 of $30,000.00 (open)"]);
+      const errorOf = (id: string) => {
+        const ex = only(executionsForRun(db, id), "execution");
+        return [ex.status, ex.error, stepsOf(db, ex.id).filter((x) => x.status === "error").map((x) => x.error), stepsOf(db, ex.id).filter((x) => x.status === "skipped").length];
+      };
+      t.eq(errorOf("no-vendor"), ["error", "One or more steps failed; see the steps.", ["This invoice's vendor is not in the vendor master."], 2], "the steps after a failed one are skipped");
+      t.eq(errorOf("no-po"), ["error", "One or more steps failed; see the steps.", ["This invoice has no PO."], 1]);
+      t.eq(errorOf("ghost-po"), ["error", "One or more steps failed; see the steps.", ["The PO is not in the procurement data."], 1]);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: the summary lists the recent invoices of the chosen outcomes, newest first, capped, and a resolved hold is no longer a hold", () => {
+    const db = openSeededMemoryDb();
+    try {
+      for (let i = 1; i <= 4; i++) addRun(db, { id: `h${i}`, decision: "HOLD", total: 100 * i, invoiceNumber: `INV-${i}`, reasons: [`Reason ${i}.`], finishedAt: `2026-11-02T0${i}:00:00.000Z` });
+      addRun(db, { id: "old", decision: "HOLD", total: 5, finishedAt: "2026-10-30T00:00:00.000Z" });
+      addRun(db, { id: "ok", decision: "APPROVE", total: 7, finishedAt: "2026-11-02T05:00:00.000Z" });
+      const v = buildSummaryVars(db, FIXED_NOW, { window_hours: 24, decisions: ["HOLD"], max_items: 2 });
+      t.eq([v["summary.count"], v["summary.total_value"], v["summary.window_hours"]], [4, 1000, 24]);
+      t.eq(v["summary.list"], "INV-4, Globex Logistics Ltd, $400.00: Reason 4.\nINV-3, Globex Logistics Ltd, $300.00: Reason 3.\n…and 2 more");
+      db.prepare("INSERT INTO run_reviews (id, run_id, action, comment, po_number, previous_decision, created_at) VALUES ('rv', 'h4', 'REJECT', 'Not ours, rejected.', NULL, 'HOLD', ?)").run(FIXED_NOW.toISOString());
+      t.eq(buildSummaryVars(db, FIXED_NOW, { window_hours: 24, decisions: ["HOLD"], max_items: 10 })["summary.count"], 3, "h4 was rejected by a person");
+      t.eq(buildSummaryVars(db, FIXED_NOW, { window_hours: 24, decisions: ["HOLD", "APPROVE"], max_items: 10 })["summary.count"], 4);
+      const none = buildSummaryVars(db, FIXED_NOW, { window_hours: 1, decisions: ["REJECT"], max_items: 10 });
+      t.eq([none["summary.count"], none["summary.list"], none["summary.total_value"]], [0, "", 0]);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: chat and webhook steps: a test shows a preview and sends nothing; live sends the escaped text and the JSON envelope", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      const stub = stubSender({ bodyText: "ok" });
+      const deps = depsFor(db, { send: stub.send, baseUrl: "https://ap.example.com" });
+      const chat = workflowBySeed(db, "chat-rejections");
+      setUrl(db, chat.id, "chat", "https://hooks.example.com/T000/B000/abcd", "s3cret");
+      db.prepare("UPDATE workflows SET enabled = 1 WHERE id = ?").run(chat.id);
+      addRun(db, { id: "rj", decision: "REJECT", total: 400, invoiceNumber: "INV-0042", vendorName: "<https://evil.example|Click> & co", reasons: ["Duplicate of INV-0042."] });
+      const test = startTestExecution(deps, chat.id, "rj", false);
+      await automationsIdle();
+      t.eq(stub.calls.length, 0, "a test does not send");
+      if (!test.ok) throw new Error("did not start");
+      const preview = JSON.parse(stepsOf(db, test.executionId).find((x) => x.node_id === "chat")?.output ?? "null").preview;
+      t.eq(preview.host, "hooks.example.com");
+      dispatchRunFinished(deps, "rj");
+      await automationsIdle();
+      const call = only(stub.calls, "send");
+      t.eq(call.req.url, "https://hooks.example.com/T000/B000/abcd");
+      t.eq(call.req.signingSecret, "s3cret");
+      t.eq(call.allowedHosts, ["hooks.example.com"]);
+      t.eq(JSON.parse(call.req.body), { text: "Rejected: &lt;https://evil.example|Click&gt; &amp; co INV-0042 ($400.00). Duplicate of INV-0042. https://ap.example.com/runs/rj" }, "the invoice's text cannot inject a link or a mention");
+      const live = only(executionsForRun(db, "rj").filter((x) => x.mode === "live"), "live execution");
+      const step = stepsOf(db, live.id).find((x) => x.node_id === "chat");
+      t.eq([live.status, step?.attempts, JSON.parse(step?.output ?? "null")], ["success", 1, { host: "hooks.example.com", status: 200, response: "ok" }]);
+      // a webhook: the envelope is JSON built as an object, never as text
+      const hook: Graph = { nodes: [node("start", "trigger.run_finished", "Start", 0, 0, { decisions: ["REJECT"], include_errors: false }), node("hook", "action.webhook", "Hook", 280, 0, { fields: [{ key: "vendor", value: "{{run.vendor_name}}" }, { key: "decision", value: "{{run.decision}}" }] })], edges: [edge("start", "out", "hook")] };
+      const route = workflowBySeed(db, "route-holds");
+      db.prepare("UPDATE workflows SET graph = ?, enabled = 1 WHERE id = ?").run(JSON.stringify(hook), route.id);
+      setUrl(db, route.id, "hook", "https://hooks.example.com/in/xyz9");
+      addRun(db, { id: "rj2", decision: "REJECT", vendorName: 'Evil "quote" \\ \n', invoiceNumber: "INV-2" });
+      dispatchRunFinished(deps, "rj2");
+      await automationsIdle();
+      const hookCall = stub.calls.filter((c) => c.req.url === "https://hooks.example.com/in/xyz9").pop();
+      t.ok(hookCall !== undefined, "the webhook step sent (the chat automation sent too, to its own URL)");
+      const sent = JSON.parse((hookCall as (typeof stub.calls)[number]).req.body);
+      t.eq([sent.event, sent.automation, sent.sent_at, sent.data], ["invoice.decided", { id: route.id, name: route.name }, FIXED_NOW.toISOString(), { vendor: 'Evil "quote" \\ \n', decision: "REJECT" }]);
+      t.ok(typeof sent.execution_id === "string");
+      t.eq((hookCall as (typeof stub.calls)[number]).req.signingSecret, null);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: sending needs a URL, a live workflow and room under the hourly limit; a send with sending off is refused by the sender", async () => {
+    const db = openSeededMemoryDb();
+    const real = CONFIG.automationMaxSendsPerHour;
+    try {
+      const stub = stubSender();
+      const deps = depsFor(db, { send: stub.send });
+      const chat = workflowBySeed(db, "chat-rejections");
+      db.prepare("UPDATE workflows SET enabled = 1 WHERE id = ?").run(chat.id);
+      addRun(db, { id: "a", decision: "REJECT", total: 1 });
+      dispatchRunFinished(deps, "a");
+      await automationsIdle();
+      const noUrl = only(executionsForRun(db, "a"), "execution");
+      t.eq([noUrl.status, stepsOf(db, noUrl.id).find((x) => x.node_id === "chat")?.error, stub.calls.length], ["error", "No webhook URL is set for this step.", 0]);
+      // the real sender with an empty allow-list: refused before any lookup, one attempt recorded
+      setUrl(db, chat.id, "chat", "https://hooks.example.com/T000/B000/abcd");
+      addRun(db, { id: "b", decision: "REJECT", total: 1 });
+      dispatchRunFinished(depsFor(db, { send: sendHttps, allowedHosts: [] }), "b");
+      await automationsIdle();
+      const refused = stepsOf(db, only(executionsForRun(db, "b"), "execution").id).find((x) => x.node_id === "chat");
+      t.eq([refused?.status, refused?.error, refused?.attempts], ["error", "Sending to other servers is turned off on this server (AUTOMATION_ALLOWED_HOSTS is empty).", 1]);
+      // the hourly sends cap counts attempts
+      (CONFIG as { automationMaxSendsPerHour: number }).automationMaxSendsPerHour = 1;
+      addRun(db, { id: "c", decision: "REJECT", total: 1 });
+      dispatchRunFinished(deps, "c");
+      await automationsIdle();
+      t.eq(stepsOf(db, only(executionsForRun(db, "c"), "execution").id).find((x) => x.node_id === "chat")?.error, "Skipped: the limit of 1 sends an hour was reached.");
+      t.eq(stub.calls.length, 0, "the stub never ran");
+      // a deleted automation's step cannot send
+      deleteWorkflow(db, chat.id);
+    } finally {
+      (CONFIG as { automationMaxSendsPerHour: number }).automationMaxSendsPerHour = real;
+      db.close();
+    }
+  });
+
+  await t.test("A4: retries: 503, 503, 200 is three attempts after sleeps of 1 s and 4 s; a 400 is one attempt; three retryable answers fail after three", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      const chat = workflowBySeed(db, "chat-rejections");
+      setUrl(db, chat.id, "chat", "https://hooks.example.com/T000/B000/abcd");
+      db.prepare("UPDATE workflows SET enabled = 1 WHERE id = ?").run(chat.id);
+      const run = async (id: string, ...answers: Partial<OutboundResponse>[]) => {
+        const stub = stubSender(...answers);
+        const deps = depsFor(db, { send: stub.send });
+        addRun(db, { id, decision: "REJECT", total: 1 });
+        dispatchRunFinished(deps, id);
+        await automationsIdle();
+        const ex = only(executionsForRun(db, id), "execution");
+        const step = stepsOf(db, ex.id).find((x) => x.node_id === "chat");
+        return { status: ex.status, attempts: step?.attempts, error: step?.error, sleeps: deps.sleeps, calls: stub.calls.length };
+      };
+      const retry = { ok: false, status: 503, retryable: true, error: "The webhook answered 503." };
+      t.eq(await run("r1", retry, retry, {}), { status: "success", attempts: 3, error: null, sleeps: [1000, 4000], calls: 3 });
+      t.eq(await run("r2", { ok: false, status: 400, retryable: false, error: "The webhook answered 400." }), { status: "error", attempts: 1, error: "The webhook answered 400.", sleeps: [], calls: 1 });
+      t.eq(await run("r3", retry), { status: "error", attempts: 3, error: "The webhook answered 503.", sleeps: [1000, 4000], calls: 3 });
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: more than the hourly number of executions are recorded as skipped and not queued", async () => {
+    const db = openSeededMemoryDb();
+    const real = CONFIG.automationMaxExecutionsPerHour;
+    try {
+      (CONFIG as { automationMaxExecutionsPerHour: number }).automationMaxExecutionsPerHour = 1;
+      const deps = depsFor(db);
+      addRun(db, { id: "r1", decision: "HOLD", total: 10 });
+      addRun(db, { id: "r2", decision: "HOLD", total: 10 });
+      dispatchRunFinished(deps, "r1");
+      dispatchRunFinished(deps, "r2");
+      await automationsIdle();
+      const second = only(executionsForRun(db, "r2"), "execution");
+      t.eq([second.status, second.error, stepsOf(db, second.id).length], ["error", "Skipped: the limit of 1 automation runs an hour was reached.", 0]);
+      t.eq(assignmentForRun(db, "r2"), null, "it never ran");
+      t.eq(only(executionsForRun(db, "r1"), "execution").status, "success");
+      t.eq(startTestExecution(deps, workflowBySeed(db, "route-holds").id, "r1", false), { ok: false, status: 409, error: "The limit of 1 automation runs an hour was reached. Try again later." }, "a test counts too");
+    } finally {
+      (CONFIG as { automationMaxExecutionsPerHour: number }).automationMaxExecutionsPerHour = real;
+      db.close();
+    }
+  });
+
+  await t.test("A4: a reset while an execution is working stops it before it writes; pausing makes dispatch record nothing; AUTOMATIONS_ENABLED=false stops dispatch", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      // an execution held in a slow send, then a reset happens (the generation moves on)
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const slow: AutomationDeps["send"] = async () => {
+        await gate;
+        return { ok: true, status: 200, bodyText: "ok", error: null, retryable: false };
+      };
+      const hook: Graph = {
+        nodes: [
+          node("start", "trigger.run_finished", "Start", 0, 0, { decisions: ["REJECT"], include_errors: false }),
+          node("chat", "action.chat", "Chat", 280, 0, { text: "hi" }),
+          node("note", "action.note", "Note", 560, 0, { text: "after the send" }),
+        ],
+        edges: [edge("start", "out", "chat"), edge("chat", "out", "note")],
+      };
+      const w = workflowBySeed(db, "chat-rejections");
+      db.prepare("UPDATE workflows SET graph = ?, enabled = 1 WHERE id = ?").run(JSON.stringify(hook), w.id);
+      setUrl(db, w.id, "chat", "https://hooks.example.com/T000/B000/abcd");
+      addRun(db, { id: "rj", decision: "REJECT", total: 1 });
+      dispatchRunFinished(depsFor(db, { send: slow }), "rj");
+      await new Promise((resolve) => setImmediate(resolve));
+      bumpAutomationGeneration(); // what the reset route does inside its exclusive section
+      release();
+      await automationsIdle();
+      t.eq(notesForRun(db, "rj").length, 0, "no note after the reset");
+      t.eq(stepsOf(db, only(executionsForRun(db, "rj"), "execution").id).filter((x) => x.node_id === "note").length, 0, "and no step for it");
+      // paused: nothing is recorded
+      const resume = await pauseAutomations(50);
+      addRun(db, { id: "p1", decision: "HOLD", total: 1 });
+      dispatchRunFinished(depsFor(db), "p1");
+      await automationsIdle();
+      t.eq(executionsForRun(db, "p1").length, 0, "paused");
+      resume();
+      dispatchRunFinished(depsFor(db), "p1");
+      await automationsIdle();
+      t.eq(executionsForRun(db, "p1").length, 1, "resumed");
+      // switched off
+      const was = process.env.AUTOMATIONS_ENABLED;
+      process.env.AUTOMATIONS_ENABLED = "false";
+      try {
+        addRun(db, { id: "p2", decision: "HOLD", total: 1 });
+        dispatchRunFinished(depsFor(db), "p2");
+        await automationsIdle();
+        t.eq(executionsForRun(db, "p2").length, 0, "AUTOMATIONS_ENABLED=false");
+      } finally {
+        if (was === undefined) delete process.env.AUTOMATIONS_ENABLED;
+        else process.env.AUTOMATIONS_ENABLED = was;
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A4: a step that throws is recorded as a fixed sentence, and the steps after it are skipped", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      const deps = depsFor(db, { send: () => Promise.reject(new Error("secret.example.com exploded")) });
+      const chat = workflowBySeed(db, "chat-rejections");
+      setUrl(db, chat.id, "chat", "https://hooks.example.com/T000/B000/abcd");
+      db.prepare("UPDATE workflows SET enabled = 1 WHERE id = ?").run(chat.id);
+      addRun(db, { id: "rj", decision: "REJECT", total: 1 });
+      dispatchRunFinished(deps, "rj");
+      await automationsIdle();
+      const ex = only(executionsForRun(db, "rj"), "execution");
+      const step = stepsOf(db, ex.id).find((x) => x.node_id === "chat");
+      t.eq([ex.status, step?.status, step?.error], ["error", "error", "This step failed unexpectedly."]);
+      t.ok(!JSON.stringify(stepsOf(db, ex.id)).includes("exploded"), "the exception text is never stored");
+    } finally {
+      db.close();
+    }
+  });
+
+  /* ---------------------------------------------------------------------------- A5: the safe sender */
+
+  await t.test("A5: allow-list matching: an exact name, *.suffix for subdomains only, a trailing dot and upper case normalised", () => {
+    t.eq(hostAllowed("hooks.slack.com", ["hooks.slack.com"]), true);
+    t.eq(hostAllowed("hooks.slack.com", ["*.slack.com"]), true);
+    t.eq(hostAllowed("evilslack.com", ["*.slack.com"]), false, "the dot is part of the suffix");
+    t.eq(hostAllowed("slack.com", ["*.slack.com"]), false, "the bare domain is not a subdomain");
+    t.eq(hostAllowed("a.b.slack.com", ["*.slack.com"]), true);
+    t.eq(hostAllowed("hooks.slack.com", ["HOOKS.SLACK.COM."]), true, "the entry is normalised too");
+    t.eq(hostAllowed("hooks.slack.com", []), false);
+    t.eq(hostAllowed("hooks.slack.com", ["", "  "]), false);
+  });
+
+  await t.test("A5: every private, loopback, link-local, mapped, 6to4 and Teredo address is refused; public ones pass", () => {
+    for (const a of ["10.0.0.5", "127.0.0.1", "169.254.169.254", "172.16.0.1", "172.31.255.255", "192.168.0.1", "100.64.0.1", "0.0.0.0", "224.0.0.1", "255.255.255.255", "198.18.0.1", "::1", "::", "fd00::1", "fe80::1", "2002:c0a8:1::1", "2001::1", "2001:db8::1", "ff02::1", "::ffff:192.168.0.1", "::ffff:7f00:1", "64:ff9b::808:808", "not an ip"]) {
+      t.eq(isBlockedAddress(a), true, a);
+    }
+    for (const a of ["8.8.8.8", "93.184.216.34", "172.32.0.1", "1.1.1.1", "2606:4700:4700::1111", "::ffff:8.8.8.8"]) t.eq(isBlockedAddress(a), false, a);
+  });
+
+  await t.test("A5: refusals happen before any lookup or connection, each with its fixed sentence", async () => {
+    const fake = fakeHttps();
+    const dns = publicResolve();
+    const send = (url: string, allowed: readonly string[] = ["hooks.example.com"], resolve = dns.resolve) => sendHttps(outbound(url), allowed, resolve, fake.request);
+    const refused = async (url: string, error: string, allowed?: readonly string[], resolve?: typeof dns.resolve) => {
+      const r = await send(url, allowed, resolve);
+      t.eq([r.ok, r.status, r.retryable, r.error, r.bodyText], [false, 0, false, error, ""], url);
+    };
+    await refused("not a url", "The webhook URL is not a valid URL.");
+    await refused("http://hooks.example.com/x", "Only https:// webhook URLs are allowed.");
+    await refused("https://user:pw@hooks.example.com/x", "The webhook URL must not contain a user name or password.");
+    await refused("https://hooks.example.com:8443/x", "Only the standard https port (443) is allowed.");
+    await refused("https://hooks.example.com/x", "Sending to other servers is turned off on this server (AUTOMATION_ALLOWED_HOSTS is empty).", []);
+    await refused("https://other.example.com/x", "other.example.com is not in this server's list of allowed webhook hosts.");
+    await refused("https://evilexample.com/x", "evilexample.com is not in this server's list of allowed webhook hosts.", ["*.example.com"]);
+    await refused("https://2130706433/x", "The webhook host points to a private or reserved address.", ["hooks.example.com"]);
+    await refused("https://0x7f.1/x", "The webhook host points to a private or reserved address.");
+    await refused("https://[::1]/x", "The webhook host points to a private or reserved address.");
+    await refused("https://127.0.0.1/x", "The webhook host points to a private or reserved address.", []);
+    await refused("https://93.184.216.34/x", "93.184.216.34 is not in this server's list of allowed webhook hosts.");
+    t.eq(dns.calls, [], "an address written in the URL is judged without any lookup");
+    t.eq(fake.calls.length, 0, "no connection for any refusal");
+    for (const bad of [["10.0.0.5"], ["::1"], ["::ffff:192.168.0.1"], ["169.254.169.254"], ["fd00::1"], ["2002:c0a8:1::1"], ["2001::1"], ["8.8.8.8", "10.0.0.5"]]) {
+      const resolver = publicResolve(bad.map((address) => ({ address, family: address.includes(":") ? 6 : 4 })));
+      await refused("https://hooks.example.com/x", "The webhook host points to a private or reserved address.", ["hooks.example.com"], resolver.resolve);
+    }
+    const gone = await send("https://hooks.example.com/x", ["hooks.example.com"], () => Promise.reject(new Error("ENOTFOUND")));
+    t.eq(gone.error, "The webhook host could not be found.");
+    t.eq((await send("https://hooks.example.com/x", ["hooks.example.com"], () => Promise.resolve([]))).error, "The webhook host could not be found.");
+    t.eq(fake.calls.length, 0, "still no connection");
+  });
+
+  await t.test("A5: a public answer connects once, to the vetted address, with the host as server name, and both signature headers", async () => {
+    const fake = fakeHttps({ status: 200, body: "ok" });
+    const dns = publicResolve([{ address: "8.8.8.8", family: 4 }]);
+    const r = await sendHttps(outbound("https://HOOKS.example.com./T0/B0/xyz?a=1", { signingSecret: "s3cret" }), ["hooks.example.com"], dns.resolve, fake.request);
+    t.eq([r.ok, r.status, r.bodyText, r.error], [true, 200, "ok", null]);
+    const call = only(fake.calls, "request");
+    t.eq([call.options.hostname, call.options.servername, call.options.path, call.options.port, call.options.method, call.options.autoSelectFamily], ["hooks.example.com", "hooks.example.com", "/T0/B0/xyz?a=1", 443, "POST", false]);
+    t.eq(dns.calls, ["hooks.example.com"]);
+    const lookup = call.options.lookup as (h: string, o: unknown, cb: (...a: unknown[]) => void) => void;
+    const all: unknown[][] = [];
+    lookup("hooks.example.com", { all: true }, (...a) => all.push(a));
+    t.eq(all, [[null, [{ address: "8.8.8.8", family: 4 }]]], "the vetted address, in the array form");
+    const one: unknown[][] = [];
+    lookup("hooks.example.com", {}, (...a) => one.push(a));
+    t.eq(one, [[null, "8.8.8.8", 4]], "and in the single form; a changed DNS answer is never used");
+    const headers = call.options.headers as Record<string, string | number>;
+    t.eq([headers["content-type"], headers["user-agent"], headers["content-length"], headers["x-invoice-ap-timestamp"]], ["application/json", "invoice-ap-automations/1", 13, "1700000000"]);
+    t.eq(headers["x-invoice-ap-signature"], `sha256=${crypto.createHmac("sha256", "s3cret").update('1700000000.{"text":"hi"}').digest("hex")}`);
+    t.eq(call.written, ['{"text":"hi"}']);
+    const unsigned = fakeHttps();
+    await sendHttps(outbound("https://hooks.example.com/x"), ["*.example.com"], dns.resolve, unsigned.request);
+    t.ok(!("x-invoice-ap-signature" in (unsigned.calls[0].options.headers as object)), "no secret, no signature");
+    t.eq(signPayload("s3cret", 1_700_000_000, "{}"), `sha256=${crypto.createHmac("sha256", "s3cret").update("1700000000.{}").digest("hex")}`);
+    const literal = fakeHttps();
+    const nodns = publicResolve();
+    const lit = await sendHttps(outbound("https://93.184.216.34/x"), ["93.184.216.34"], nodns.resolve, literal.request);
+    t.eq([lit.ok, nodns.calls.length, literal.calls[0].options.hostname], [true, 0, "93.184.216.34"], "a public literal that was allowed on purpose connects without a lookup");
+  });
+
+  await t.test("A5: answers: 2xx is ok, a redirect is refused, 429 and 5xx retry, other 4xx do not; the body is cut and cleaned", async () => {
+    const dns = publicResolve();
+    const answer = async (script: FakeScript) => sendHttps(outbound("https://hooks.example.com/x"), ["hooks.example.com"], dns.resolve, fakeHttps(script).request);
+    for (const [status, ok, retryable, error] of [
+      [200, true, false, null],
+      [204, true, false, null],
+      [301, false, false, "The webhook answered with a redirect, which is not followed."],
+      [302, false, false, "The webhook answered with a redirect, which is not followed."],
+      [400, false, false, "The webhook answered 400."],
+      [404, false, false, "The webhook answered 404."],
+      [429, false, true, "The webhook answered 429."],
+      [500, false, true, "The webhook answered 500."],
+      [503, false, true, "The webhook answered 503."],
+    ] as const) {
+      const r = await answer({ status });
+      t.eq([r.ok, r.status, r.retryable, r.error], [ok, status, retryable, error], String(status));
+    }
+    const cleaned = await answer({ body: `a\u0000b\u0007c${"x".repeat(1000)}` });
+    t.eq(cleaned.bodyText.length, CONFIG.automationResponseKeepChars, "only a few hundred characters are kept");
+    t.ok(cleaned.bodyText.startsWith("abcxxx"), "control characters removed");
+    const huge = await answer({ bodyBytes: 200_000 });
+    t.eq([huge.ok, huge.bodyText.length], [true, CONFIG.automationResponseKeepChars], "a huge answer is cut at 64 KB and answered once");
+    const net = await answer({ networkError: true });
+    t.eq([net.ok, net.status, net.retryable, net.error], [false, 0, true, "The webhook could not be reached."]);
+    t.ok(!JSON.stringify(net).includes("secret.example.com"), "the exception text (which can echo the host) is never kept");
+  });
+
+  await t.test("A5: the whole attempt has a deadline: a server that never finishes is cut off, and it is retryable", async () => {
+    const real = CONFIG.automationStepTimeoutMs;
+    (CONFIG as { automationStepTimeoutMs: number }).automationStepTimeoutMs = 50;
+    try {
+      const fake = fakeHttps({ neverEnds: true });
+      const r = await sendHttps(outbound("https://hooks.example.com/x"), ["hooks.example.com"], publicResolve().resolve, fake.request);
+      t.eq([r.ok, r.status, r.retryable, r.error], [false, 0, true, "The webhook did not answer within 10 seconds."]);
+      t.eq(fake.calls[0].destroyedWith.length, 1, "the connection was destroyed");
+    } finally {
+      (CONFIG as { automationStepTimeoutMs: number }).automationStepTimeoutMs = real;
+    }
   });
 }
