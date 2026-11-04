@@ -112,6 +112,7 @@ export function usePoll<T>(fetcher: (signal: AbortSignal) => Promise<T>, options
     let timer: ReturnType<typeof setTimeout> | null = null;
     let controller: AbortController | null = null;
     let waiters: Array<() => void> = [];
+    let waitingForVisible = false;
 
     const clearTimer = () => {
       if (timer !== null) {
@@ -127,6 +128,14 @@ export function usePoll<T>(fetcher: (signal: AbortSignal) => Promise<T>, options
         return;
       }
       if (stopped || !repeat) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        // a hidden tab does not poll; the next request goes out when it is shown again (review round B11)
+        if (!waitingForVisible) {
+          waitingForVisible = true;
+          document.addEventListener("visibilitychange", onVisible);
+        }
+        return;
+      }
       const delay =
         failures === 0
           ? intervalMs
@@ -182,6 +191,13 @@ export function usePoll<T>(fetcher: (signal: AbortSignal) => Promise<T>, options
       }
     };
 
+    const onVisible = () => {
+      if (document.visibilityState === "hidden") return;
+      document.removeEventListener("visibilitychange", onVisible);
+      waitingForVisible = false;
+      void run();
+    };
+
     controlRef.current = {
       refresh: () =>
         new Promise<void>((resolve) => {
@@ -203,6 +219,7 @@ export function usePoll<T>(fetcher: (signal: AbortSignal) => Promise<T>, options
     return () => {
       disposed = true;
       clearTimer();
+      document.removeEventListener("visibilitychange", onVisible);
       controller?.abort();
       controlRef.current = null;
       for (const done of waiters) done();
