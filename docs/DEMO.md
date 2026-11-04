@@ -40,6 +40,8 @@ Plan section 12, with the real clicks. Each sample run takes about 3 seconds plu
 - Open stage **8 Amounts vs PO** (**Failed**, **HOLD**): **PO BALANCE MATHS** shows PO-1003 total $30,000.00, already approved (GLX-301, GLX-302) -$24,000.00, remaining $6,000.00, this invoice $9,000.00, over by **$3,000.00**.
 - Say: "Each invoice on its own looks fine; together they bill more than the PO. Next action: ask the buyer for a PO amendment or the vendor for a credit of three thousand dollars."
 
+**Optional, 60 s: automations.** On the sample 3 page, scroll to **Automations** at the bottom: "Route holds to the right person", Succeeded, "Assigned to AP lead". Open **Automations** in the header, then **Route holds to the right person**: the canvas shows the seven steps (If the invoice is flagged, then who to assign). Press **Test with an invoice**, choose the sample 9 run and **Run test**: History shows each step, and the assign step reads "Not written (test)" with who it would assign (Finance security) and the note it would add. Say: "They route what was decided and can never change it: a build check and a test over all ten samples prove that."
+
 **5. #4 Disguised duplicate (35 s)**
 - **Disguised duplicate** (**Edge case B**). Result **REJECT**: "Duplicate of INV-0042 (processed 2026-10-05); numbers differ only in formatting."
 - Optional: open **9 Duplicate check**: **Duplicate of INV-0042**, the earlier invoice, its date and decision, **Open the earlier record**.

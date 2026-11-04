@@ -1,5 +1,7 @@
 # Invoice AP Agent
 
+New here? Start with the [Reviewer guide](REVIEWER_GUIDE.md): a one-page map of what it does, where decisions are made and what has not been verified.
+
 An accounts-payable agent that takes a vendor invoice PDF and returns **Approve, Hold or Reject**, with every step, every reason and the next action on screen. It screens the PDF for tampering and prompt injection, has an LLM (through OpenRouter) read it into structured fields, then checks those fields against the vendor master and the purchase orders with plain TypeScript rules. Built for the PS-1 finance case study ([PROBLEM.md](PROBLEM.md)): Next.js 15, TypeScript, SQLite.
 
 > **Design principle: the model reads, the rules decide, every decision has a reason, and the invoice is never trusted.**
@@ -21,6 +23,7 @@ An accounts-payable agent that takes a vendor invoice PDF and returns **Approve,
 ## Contents
 
 - [How it works](#how-it-works)
+- [Automations](#automations)
 - [The 10 sample invoices](#the-10-sample-invoices)
 - [Quick start](#quick-start)
 - [Environment variables](#environment-variables)
@@ -47,6 +50,7 @@ A run starts from an upload or a sample card (`POST /api/runs` answers `202 { ru
 | 9 | Duplicate check | Same vendor and same normalized number: REJECT. A number that differs only by look-alike characters or zero padding (`INV-O042`, `INV-42`): HOLD. Same vendor, same amount within 7 days: HOLD. Same amount further apart: recurring, fine. Credit notes are compared with credit notes; other non-invoice documents are not compared | code |
 | 10 | Decision | `decide()`: any reject wins, then any hold or system error, else APPROVE (warnings become notes). A run with a security flag can never be APPROVE. `nextAction()` writes the next step | code ([`rules.ts`](src/lib/rules.ts)) |
 | 11 | Human review (optional) | A person resolves a HOLD from the run page: approve (choosing the PO when it was inferred, and re-checking its balance) or reject, with a written comment of 10 to 500 characters and the operator token. A flagged invoice is approved only with a comment that starts "Security review:", new bank details only with "Bank verified:", and a hold with no resolved vendor can only be rejected. The stages above stay as the machine decided them; the invoice's current state takes the review, so PO balances and the duplicate check follow it | a person (the rules only check that it is allowed) ([`review.ts`](src/lib/review.ts)) |
+| 12 | Automations (optional) | After a decision, or on a schedule, the enabled automations run: one starting step, if and split steps, look-ups (vendor, PO balance, a summary of recent invoices) and actions (a note on the invoice, an assignment, a signed webhook, a chat message). They route what was decided and can never change it | code ([`src/lib/automations/`](src/lib/automations/)); see [Automations](#automations) |
 
 Every check runs even after a failure, so a reviewer sees all problems at once; a rejected file (stage 1) or a failed extraction (stage 3) skips the stages that would have nothing to check. A stage that throws or does not settle in 5 minutes becomes a "System error" step, and the run is held.
 
@@ -64,6 +68,19 @@ Every check runs even after a failure, so a reviewer sees all problems at once; 
 Sample 9 shows this: its hidden sentence is caught by the tiny-text check, the text scan and the model report at once. With no API key at all, sample 9 is still held with the security flag, because stage 2 runs before any model call (checked offline on the final code with an extractor that fails as a missing key does, and seen on an earlier dry-run server).
 
 **Storage and audit trail.** One SQLite file at `$DATA_DIR/app.db`; uploads are stored as `$DATA_DIR/uploads/<sha256>.pdf`, never under their own file name. Vendors, purchase orders and the pre-loaded history come from `data/seed/*.json`; the sample PDFs and their truth files from `data/samples/` (both read from the project root, whatever `DATA_DIR` says). Runs are append-only: each keeps its steps and evidence, the raw model output, the model that answered, the prompt version and the cost. On startup the app creates the tables, seeds an empty database and marks runs cut off by a restart as "Interrupted by restart, please re-run". Runs go through one in-process queue, so two invoices never race for the same PO balance; a 350 ms pause between stages (`CONFIG.stagePacingMs`) keeps the live view readable.
+
+## Automations
+
+After the agent has decided an invoice, or on a schedule, **automations** tell the right people and tools: Sam's team hears about a hold without watching the dashboard. An automation is a small graph of steps with exactly one trigger ("When an invoice is decided", "When a hold is resolved" or "On a schedule"), logic steps (If, Split by decision), look-up steps (the vendor, the PO balance, a summary of recent invoices) and action steps (add a note to the invoice, assign it to someone, send to a webhook, post a chat message). Build one on the canvas (drag steps in, connect them, set each in the side panel) or in the keyboard-friendly **Steps** list; both edit the same graph, below 1024 px only the Steps list is shown. **Test with an invoice** runs an automation against a real past run and shows what every step did, writing nothing. Open **Automations** in the header.
+
+**Automations never decide.** They only route what the agent decided: they cannot write a decision, an invoice, a PO or a vendor, and they never call the review code. That is not a promise, it is checked: `scripts/check-static.ts` (check 4b) fails the build if any automations code writes those tables, and the `test-api` test "automations invariant" runs all ten samples with every automation on and off and compares every decision, invoice and PO balance (identical).
+
+The three that come with the demo (a reset brings them back): **Route holds to the right person** (on: security flags go to "Finance security" with a note, holds over $5,000 to "AP lead", the rest to "AP clerk"), **Tell the team about rejections** (off: posts each rejection to a chat webhook) and **Morning summary of holds** (off: every day at 08:00 UTC, posts the holds of the last 24 hours). Each run page ends with what the automations did for that invoice.
+
+- **Who can change them.** Anyone can look; creating, saving, turning on or off, deleting and testing need the operator token (the same `DEMO_RESET_TOKEN` as the reset, asked for once per browser tab).
+- **Sending to other servers is off** until `AUTOMATION_ALLOWED_HOSTS` lists the hosts (`hooks.slack.com,*.example.com`): https on port 443 only, every address the name resolves to must be public, the connection is pinned to it, no redirect is followed, and a request carries `x-invoice-ap-timestamp` and `x-invoice-ap-signature` (HMAC-SHA256 of `timestamp.body`) when a signing secret is set. Webhook URLs and signing secrets are stored on the server and never returned by the API (only a hint such as `hooks.slack.com/…/a1b2`). With nothing allowed, webhook and chat steps show a preview in a test and fail with a clear message live. Set `APP_BASE_URL` so messages link to the run.
+- **Limits.** 30 steps and 60 connections per automation, 300 executions an hour in all, 60 sends an hour, 10 s and 3 attempts per send, the newest 500 executions kept per automation. `AUTOMATIONS_ENABLED=false` stops them from running (the pages still open).
+- **Hosting.** The schedule is checked once a minute by the server itself. On a host that sleeps idle instances, a slot that fell while it slept runs once when it wakes, if it is still the latest slot; missed earlier slots are not replayed.
 
 ## The 10 sample invoices
 
@@ -125,6 +142,9 @@ Only the server reads them; nothing is a `NEXT_PUBLIC_` variable. `npm run dev` 
 | `DEMO_RESET_TOKEN` | for reset | none | At least 16 characters (shorter counts as unset); sent in the `x-reset-token` header. Generate one with `openssl rand -hex 24` |
 | `MAX_RUNS_PER_HOUR` | no | `60` | Global cap on runs started per rolling hour (only requests that create a run count) |
 | `EXTRACT_MOCK` | development only | off | `1` (or `true`, `truth`): mock extractor; `fooled`: mock of a fooled model |
+| `AUTOMATIONS_ENABLED` | no | on | `false` stops automations from running; the pages still open |
+| `AUTOMATION_ALLOWED_HOSTS` | for sending | empty | Comma list of hosts webhook and chat steps may send to (`hooks.slack.com,*.example.com`); empty means sending is off |
+| `APP_BASE_URL` | no | none | `https://host` (or `http://localhost:3000`) so automation messages can link to a run; anything else is ignored |
 | `PORT` | no | `3000` | Port of `next dev` / `next start`. Railway injects it |
 | `RAILWAY_RUN_UID` | Railway only | none | Set to `0` on Railway: its volumes are mounted as root and the image runs as the `node` user (see below) |
 
@@ -229,7 +249,8 @@ Railway facts this relies on (from its documentation, 2026-11-03): it injects `P
 src/lib/          the pipeline: pdf.ts + pdf-text-worker.mjs (upload checks), guardrails.ts (screen, grounding),
                   extract.ts (OpenRouter) + extract-mock.ts, normalize.ts, rules.ts (every check, decide, nextAction),
                   pipeline.ts (queue, stages), db.ts, seed.ts, master.ts, config.ts (thresholds, env)
-src/app/          pages (dashboard, /runs/new, /runs/[id], /data) and the HTTP API under src/app/api
+                  review.ts (a person resolves a hold), workflow-graph.ts + automations/ (the automations: store, engine, sender, scheduler)
+src/app/          pages (dashboard, /runs/new, /runs/[id], /data, /automations) and the HTTP API under src/app/api
 src/components/   UI (run view, dashboard, start page, data page)
 data/seed/        vendors, purchase orders, pre-loaded history
 data/samples/     the 10 sample PDFs and truth/NN.json
