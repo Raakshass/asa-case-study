@@ -2703,6 +2703,22 @@ async function reviewGroup(t: Check): Promise<void> {
     t.eq(rig.db.prepare("SELECT po_number FROM invoices WHERE id = ?").pluck().get(id), "PO-1005", "the stored PO is the canonical number");
   });
 
+  await t.test("every 429 carries the Retry-After header as well as the body field", async () => {
+    const { apiError } = await import("../src/app/api/_lib/http");
+    t.eq(apiError(429, "Too many.", { retryAfterSec: 7 }).headers.get("retry-after"), "7");
+    t.eq(apiError(400, "Bad.").headers.get("retry-after"), null, "only where there is a wait");
+    t.eq(apiError(429, "Too many.", { retryAfterSec: 7, headers: { "Retry-After": "9" } }).headers.get("retry-after"), "9", "a caller's own header wins");
+    // through a real route: the 31st write from one address
+    limiter.resetWriteLimits();
+    const ghost = crypto.randomUUID();
+    const ip = freshIp();
+    let last: Response | null = null;
+    for (let i = 0; i < 31; i++) last = await reviewRoute.POST(postReview(ghost, { action: "REJECT", comment: GOOD_COMMENT }, RESET_TOKEN, ip), idContext(ghost));
+    t.eq(last?.status, 429);
+    t.ok(Number(last?.headers.get("retry-after")) >= 1, "the write-limit 429 has a Retry-After");
+    limiter.resetWriteLimits();
+  });
+
   await t.test("B4: a reset wipes the reviews", async () => {
     t.ok(countOf(db, "run_reviews") > 0, "there are reviews to wipe");
     await resetViaRoute(t);

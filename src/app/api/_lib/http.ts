@@ -13,10 +13,14 @@ export function json(body: unknown, init: { status?: number; headers?: Record<st
   return new Response(JSON.stringify(body), { status: init.status ?? 200, headers: { ...JSON_HEADERS, ...init.headers } });
 }
 
-/** `{ error }` (plus `retryAfterSec` on a 429). The message is fixed text: never the request's own content, never a path. */
+/**
+ * `{ error }` (plus `retryAfterSec` on a 429, and the same number as a Retry-After header, so no route can forget it). The
+ * message is fixed text: never the request's own content, never a path. A header a caller passes itself wins.
+ */
 export function apiError(status: number, error: string, opts: { retryAfterSec?: number; headers?: Record<string, string> } = {}): Response {
   const body: ApiError = opts.retryAfterSec === undefined ? { error } : { error, retryAfterSec: opts.retryAfterSec };
-  return json(body, { status, headers: opts.headers });
+  const headers = opts.retryAfterSec === undefined ? opts.headers : { "Retry-After": String(opts.retryAfterSec), ...opts.headers };
+  return json(body, { status, headers });
 }
 
 /** Error name (or system error code) only, in a safe charset: the message may quote content, a path or a query. */
