@@ -88,6 +88,7 @@ export function StepCard({ data, selected, isConnectable }: NodeProps<StepNode>)
           position={Position.Left}
           isConnectable={isConnectable}
           isConnectableStart={false}
+          role="img"
           aria-label={`Input of ${node.name}`}
         />
       )}
@@ -145,6 +146,7 @@ export function StepCard({ data, selected, isConnectable }: NodeProps<StepNode>)
           id={output.id}
           isConnectable={isConnectable}
           isConnectableEnd={false}
+          role="img"
           aria-label={`Output ${output.label} of ${node.name}`}
           style={branching ? { top: `${((i + 0.5) / outputs.length) * 100}%` } : undefined}
         />

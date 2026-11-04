@@ -748,6 +748,11 @@ async function sectionKeyboard(page: Page): Promise<void> {
     ["data page", "/data"],
   ];
   if (nine) pages.push(["run view of #9, every stage open", `/runs/${nine.id}`]);
+  // fix round N1: the automations list and the editor (its canvas handles were unnamed role-less elements with an aria-label)
+  const autos = (await (await page.request.get(`${BASE}/api/automations`)).json()) as { automations: { id: string; seed_key: string | null }[] };
+  pages.push(["automations list", "/automations"]);
+  const routeHolds = autos.automations.find((x) => x.seed_key === "route-holds");
+  if (routeHolds) pages.push(["automation editor (canvas)", `/automations/${routeHolds.id}`]);
   // fix round UI-5: the decision card with an "Also noted" list
   const five = listed.runs.find((r) => r.file_name === "05-scanned-no-po.pdf");
   if (five) pages.push(["run view of #5 (with an 'Also noted' list), every stage open", `/runs/${five.id}`]);
@@ -759,6 +764,10 @@ async function sectionKeyboard(page: Page): Promise<void> {
         await decisionCard(page).waitFor();
         await page.getByRole("button", { name: "Expand all" }).click();
         await page.waitForTimeout(300);
+      }
+      if (url.startsWith("/automations/")) {
+        await page.locator(".react-flow__node").first().waitFor();
+        await page.waitForTimeout(600);
       }
       await page.addScriptTag({ content: source });
       const violations = await page.evaluate(async () => {
