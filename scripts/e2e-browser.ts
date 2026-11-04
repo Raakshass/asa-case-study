@@ -323,7 +323,8 @@ async function runSampleViaUi(page: Page, s: TruthSample, expectedStages: string
     has(poRow, m.expectedPo.po_number, `#${s.id} PO shown in the PO match stage`);
     if (m.expectedPo.inferred) {
       has(poRow, "inferred", `#${s.id} inferred PO`);
-      await page.locator('li[data-stage="po_match"] > button').click();
+      const poButton = page.locator('li[data-stage="po_match"] > button');
+      if ((await poButton.getAttribute("aria-expanded")) !== "true") await poButton.click(); // a held stage opens by itself (review round U4)
       const panel = page.locator('li[data-stage="po_match"] > [role="region"]');
       await panel.waitFor();
       const p = (await panel.innerText()).replace(/\s+/g, " ");
@@ -495,7 +496,7 @@ async function sectionDashboard(page: Page): Promise<void> {
     eq(await page.locator("tr[data-run-id]").filter({ hasText: "history" }).count(), 4, "four history rows");
     const row = page.locator("tr[data-run-id]").first();
     const id = await row.getAttribute("data-run-id");
-    await row.locator("td").nth(2).click(); // the Vendor cell
+    await row.locator("td").nth(2).click(); // the Invoice no. cell (review round U5)
     await page.waitForURL(`${BASE}/runs/${id}`);
     await decisionCard(page).waitFor();
     eq(takeProblems(page), [], "browser console and network");
@@ -688,7 +689,7 @@ async function sectionKeyboard(page: Page): Promise<void> {
     const fakeButtons = await page.locator('[role="button"]:not(button)').count();
     eq(fakeButtons, 0, "role=button on something that is not a <button>");
   });
-  await check("keyboard", "run view: Tab reaches the stepper; Enter opens a stage, Space closes it; focus is always drawn", async () => {
+  await check("keyboard", "run view: Tab reaches the stepper; a failed stage starts open, Enter closes it, Space opens it; focus is always drawn", async () => {
     const runs = (await (await page.request.get(`${BASE}/api/runs?limit=200`)).json()) as { runs: { id: string; file_name: string | null }[] };
     const three = runs.runs.find((r) => r.file_name === "03-split-po-overbill.pdf");
     ok(three, "a run of #3 exists");
@@ -706,14 +707,14 @@ async function sectionKeyboard(page: Page): Promise<void> {
     ok(reached, "Tab reaches the Amounts stage button");
     eq(undrawn, [], "focused elements without a visible focus indicator");
     const button = page.locator('li[data-stage="amounts"] > button');
-    eq(await button.getAttribute("aria-expanded"), "false", "closed at first");
+    eq(await button.getAttribute("aria-expanded"), "true", "a failed stage is open at first");
     await page.keyboard.press("Enter");
-    await page.locator('li[data-stage="amounts"] > [role="region"]').waitFor();
-    eq(await button.getAttribute("aria-expanded"), "true", "Enter opens it");
-    has(await page.locator('li[data-stage="amounts"] > [role="region"]').innerText(), "remaining", "the evidence shows the balance maths");
-    await page.keyboard.press("Space");
     await page.waitForTimeout(150);
-    eq(await button.getAttribute("aria-expanded"), "false", "Space closes it");
+    eq(await button.getAttribute("aria-expanded"), "false", "Enter closes it");
+    await page.keyboard.press("Space");
+    await page.locator('li[data-stage="amounts"] > [role="region"]').waitFor();
+    eq(await button.getAttribute("aria-expanded"), "true", "Space opens it");
+    has(await page.locator('li[data-stage="amounts"] > [role="region"]').innerText(), "remaining", "the evidence shows the balance maths");
     eq(await page.locator('[role="button"]:not(button)').count(), 0, "role=button on something that is not a <button>");
     eq(takeProblems(page), [], "browser console and network");
   });

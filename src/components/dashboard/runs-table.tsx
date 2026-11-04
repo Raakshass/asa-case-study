@@ -5,12 +5,13 @@ import { useRouter } from "next/navigation";
 import type { MouseEvent } from "react";
 import { cn } from "cn";
 import { DecisionBadge } from "@/components/shared/decision-badge";
+import { Ident } from "@/components/shared/ident";
 import { Money } from "@/components/shared/money";
 import { SecurityBadge } from "@/components/shared/security-badge";
 import { TableFrame } from "@/components/shared/table-frame";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { RunListItem } from "@/lib/types";
-import { amountView, displayText, fileLabel, formatWhen, reasonView } from "./run-format";
+import { amountView, displayText, fileLabel, formatCost, formatWhen, reasonView } from "./run-format";
 
 /** Capitalises the first letter (a reason that lost its lead-in prefix). */
 function sentence(text: string): string {
@@ -98,8 +99,8 @@ function RunRow({ run }: { run: RunListItem }) {
       </TableCell>
       <TableCell className="px-3 py-3">
         {invoiceNumber ? (
-          <span className="block max-w-[10rem] truncate font-mono text-sm" title={invoiceNumber}>
-            {invoiceNumber}
+          <span className="block max-w-[10rem] truncate text-sm" title={invoiceNumber}>
+            <Ident>{invoiceNumber}</Ident>
           </span>
         ) : (
           <Placeholder label="No invoice number" />
@@ -122,6 +123,7 @@ function RunRow({ run }: { run: RunListItem }) {
           {reason.text}
         </span>
       </TableCell>
+      <TableCell className="px-3 py-3 text-right text-muted-foreground tabular-nums">{formatCost(run.cost_usd)}</TableCell>
     </TableRow>
   );
 }
@@ -131,7 +133,7 @@ export interface RunsTableProps {
 }
 
 /**
- * The dashboard table: Date, Vendor (with the file or "Pre-loaded history" under it), Invoice no., Amount, Decision (+ shield), Reason. It scrolls
+ * The dashboard table: Date, Vendor (with the file or "Pre-loaded history" under it), Invoice no., Amount, Decision (+ shield), Reason, Cost. It scrolls
  * inside its own frame on a narrow screen (the page never scrolls sideways); below 1024 px the decision is repeated
  * under the vendor, so a phone shows what happened to each invoice without scrolling the table. Every run text
  * is plain React text.
@@ -158,6 +160,9 @@ export function RunsTable({ runs }: RunsTableProps) {
           </TableHead>
           <TableHead scope="col" className="px-3">
             Reason
+          </TableHead>
+          <TableHead scope="col" className="px-3 text-right">
+            Cost
           </TableHead>
         </TableRow>
       </TableHeader>

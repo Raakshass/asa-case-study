@@ -229,8 +229,8 @@
 
 /*
  * The approval stamp (the one bold element of the AP desk): the decision drawn as a rubber stamp. Ink on a pale
- * surface, a heavy border with a thin second line outside it, a 2 degree tilt and nothing else (no texture, no
- * animation). The tone comes from the text-* and bg-*-soft classes the component adds, so border and text share
+ * surface, a heavy border with a thin second line outside it, a 2 degree tilt and no texture. It presses in once when a
+ * run finishes while the page is open (data-pressed; never on reload, never with reduced motion). The tone comes from the text-* and bg-*-soft classes the component adds, so border and text share
  * one colour. It is the only uppercase text in the app.
  */
 @layer components {
@@ -254,6 +254,21 @@
     width: 1.375rem;
     height: 1.375rem;
     flex-shrink: 0;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .stamp[data-pressed="true"] {
+      animation: stamp-press 180ms ease-out both;
+    }
+  }
+  @keyframes stamp-press {
+    from {
+      transform: rotate(-2deg) scale(1.12);
+      opacity: 0;
+    }
+    to {
+      transform: rotate(-2deg) scale(1);
+      opacity: 1;
+    }
   }
   /* Accounting rules: a single line above a subtotal and a double line under the final figure (money sums only). */
   .rule-single {

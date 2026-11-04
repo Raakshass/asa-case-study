@@ -65,6 +65,8 @@ export interface DecisionBadgeProps {
   size?: keyof typeof SIZE;
   /** soft: quiet icon and word (default). solid: the approval stamp, for the decision on the run page. */
   variant?: "soft" | "solid";
+  /** solid only: press the stamp in once (the run finished while the page was open). */
+  pressed?: boolean;
   className?: string;
 }
 
@@ -72,15 +74,16 @@ export interface DecisionBadgeProps {
  * Approved (green check), On hold (amber pause), Rejected (red cross), or a neutral in-progress state.
  * Always an icon AND a text label, never colour alone. The stamp variant draws the same words in capitals
  * (CSS only; the text in the page stays sentence case). `data-decision` keeps the decision token.
- * Server-safe (no state, no effects).
+ * Server-safe (no state, no effects); the press animation is a CSS class driven by `pressed`.
  */
-export function DecisionBadge({ decision, runStatus, size = "md", variant = "soft", className }: DecisionBadgeProps) {
+export function DecisionBadge({ decision, runStatus, size = "md", variant = "soft", pressed = false, className }: DecisionBadgeProps) {
   const view = viewFor(decision, runStatus);
   const { Icon } = view;
   const stamp = variant === "solid";
   return (
     <span
       data-decision={view.key}
+      data-pressed={stamp && pressed ? "true" : undefined}
       className={cn(
         "inline-flex w-fit shrink-0 items-center whitespace-nowrap",
         stamp ? ["stamp", STAMP_TONE[view.tone]] : ["font-semibold", SIZE[size], INK_TONE[view.tone]],

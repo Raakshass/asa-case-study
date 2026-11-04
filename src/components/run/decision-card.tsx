@@ -5,6 +5,7 @@ import { useId, useState } from "react";
 import { ArrowRight, History } from "lucide-react";
 import { cn } from "cn";
 import { DecisionBadge } from "@/components/shared/decision-badge";
+import { Ident } from "@/components/shared/ident";
 import { GroundedMark } from "@/components/shared/grounded-mark";
 import { ProgressBar } from "@/components/shared/progress-bar";
 import { SecurityBadge } from "@/components/shared/security-badge";
@@ -76,8 +77,8 @@ function Slip({ run }: { run: RunDetail }) {
           {items.map((item) => (
             <div key={item.label} className="flex min-w-0 items-baseline gap-1.5">
               <dt className="text-muted-foreground">{item.label}</dt>
-              <dd className={cn("min-w-0 font-semibold break-words", item.mono ? "font-mono" : "tabular-nums")}>
-                {item.value}
+              <dd className="min-w-0 font-semibold break-words tabular-nums">
+                {item.mono ? <Ident>{item.value}</Ident> : item.value}
                 {item.ok ? <GroundedMark status="grounded" className="ml-1 align-middle text-approve" /> : null}
               </dd>
             </div>
@@ -237,6 +238,7 @@ function Meta({ run }: { run: RunDetail }) {
   if (prompt) items.push(["Prompt", prompt]);
   if (took) items.push(["Took", took]);
   items.push(["Cost", formatCost(run.cost_usd)]);
+  items.push(["Run", run.id.slice(0, 8)]);
   if (finished) items.push(["Finished", finished]);
   return (
     <dl className="flex flex-wrap gap-x-5 gap-y-1.5 border-t border-border pt-4 text-sm">
@@ -269,6 +271,8 @@ export interface DecisionCardProps {
  */
 export function DecisionCard({ run }: DecisionCardProps) {
   const headingId = useId();
+  // The stamp presses in once, only when this run was still going when the page opened it (review round U4).
+  const [wasLive] = useState(() => run.status === "queued" || run.status === "running");
 
   if (run.is_history) {
     const processed = formatDate(run.finished_at ?? run.created_at);
@@ -336,7 +340,7 @@ export function DecisionCard({ run }: DecisionCardProps) {
         </h2>
         <div className="mt-1 mr-2 ml-auto flex flex-wrap items-center justify-end gap-4">
           {run.security_flag ? <SecurityBadge size="lg" /> : null}
-          <DecisionBadge decision={decision} runStatus={run.status} size="lg" variant="solid" />
+          <DecisionBadge decision={decision} runStatus={run.status} size="lg" variant="solid" pressed={wasLive && run.status === "done"} />
         </div>
       </div>
 

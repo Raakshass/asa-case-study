@@ -29,17 +29,11 @@ function gone(error: Error | null, status: 400 | 404): boolean {
   return error instanceof ApiFailure && error.status === status;
 }
 
-/** "Run 5aeb6bad": the first eight characters of the id, shown only when the id is the shape of a run id. */
-function shortId(id: string): string {
-  return /^[0-9a-f]{8}-/i.test(id) ? `Run ${id.slice(0, 8)}` : "Run";
-}
-
-function Header({ id, run, actions }: { id: string; run: RunDetail | null; actions: boolean }) {
+function Header({ run, actions }: { run: RunDetail | null; actions: boolean }) {
   const name = run ? displayText(run.file_name, 100) : "";
   const when = run ? (run.is_history ? formatDate(run.finished_at ?? run.created_at) : formatDateTime(run.created_at)) : null;
   return (
     <PageHeader
-      eyebrow={shortId(id)}
       title={run?.is_history ? "Pre-loaded history record" : name || "Invoice run"}
       description={run && when ? (run.is_history ? `Processed on ${when}` : `Started ${when}`) : undefined}
       actions={
@@ -141,7 +135,7 @@ export function RunView({ id }: RunViewProps) {
 
   return (
     <>
-      <Header id={id} run={invalid || missing ? null : run} actions={!(invalid || missing)} />
+      <Header run={invalid || missing ? null : run} actions={!(invalid || missing)} />
       <p role="status" className="sr-only">
         {announcement}
       </p>

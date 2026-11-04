@@ -1,4 +1,5 @@
 import { Lock, TriangleAlert } from "lucide-react";
+import { Ident } from "@/components/shared/ident";
 import { Money } from "@/components/shared/money";
 import { TableFrame } from "@/components/shared/table-frame";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -53,7 +54,7 @@ function PoRow({ po }: { po: MasterPo }) {
       <TableCell className="px-3 py-3">
         <div className="flex flex-col gap-0.5">
           <div className="flex items-center gap-2">
-            <span className="font-mono font-semibold text-foreground">{po.po_number}</span>
+            <Ident className="font-semibold text-foreground">{po.po_number}</Ident>
             {closed ? <ClosedTag /> : null}
           </div>
           <span className="block max-w-[18rem] truncate text-sm text-muted-foreground" title={lines}>

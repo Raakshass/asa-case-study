@@ -27,7 +27,7 @@ interface StepRowProps {
   step: StepView;
   run: RunDetail;
   open: boolean;
-  onToggle: (key: StageKey) => void;
+  onToggle: (step: StepView) => void;
   panelId: string;
   buttonId: string;
 }
@@ -61,7 +61,7 @@ function StepRow({ step, run, open, onToggle, panelId, buttonId }: StepRowProps)
         aria-expanded={expandable ? open : undefined}
         aria-controls={expandable && open ? panelId : undefined}
         disabled={!expandable}
-        onClick={() => onToggle(step.key)}
+        onClick={() => onToggle(step)}
         className={cn(
           "flex w-full items-start gap-3 px-3 py-2.5 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:px-4",
           expandable ? "cursor-pointer hover:bg-accent/40" : "cursor-default",
@@ -120,28 +120,27 @@ export interface StepperProps {
 }
 
 /**
- * The ten stages as a vertical stepper. Every row is a button; the rows a visitor opened stay open while the run
- * is polled (the state lives here, not in the data), and "Expand all" opens every stage that has started.
+ * The ten stages as a vertical stepper. Every row is a button. A stage that failed (or holds the run) opens by itself;
+ * the rows a visitor opened or closed keep that choice while the run is polled (the state lives here, not in the data),
+ * and "Expand all" opens every stage that has started.
  */
 export function Stepper({ run }: StepperProps) {
   const uid = useId();
-  const [open, setOpen] = useState<ReadonlySet<StageKey>>(() => new Set());
+  /** Stages a person opened or closed; the rest follow opensByItself (review round U4). */
+  const [toggled, setToggled] = useState<ReadonlyMap<StageKey, boolean>>(() => new Map());
+  const opensByItself = (s: StepView) => s.status === "fail" || s.status === "error" || (s.status === "warn" && s.severity === "hold");
+  const isOpen = (s: StepView) => s.status !== "pending" && (toggled.get(s.key) ?? opensByItself(s));
   const byKey = new Map(run.steps.map((s) => [s.key, s]));
   const rows = STAGES.map((stage) => byKey.get(stage.key) ?? pendingStep(stage));
   const expandable = rows.filter((s) => s.status !== "pending");
-  const allOpen = expandable.length > 0 && expandable.every((s) => open.has(s.key));
+  const allOpen = expandable.length > 0 && expandable.every(isOpen);
 
-  function toggle(key: StageKey) {
-    setOpen((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+  function toggle(step: StepView) {
+    setToggled((prev) => new Map(prev).set(step.key, !isOpen(step)));
   }
 
   function toggleAll() {
-    setOpen(allOpen ? new Set() : new Set(expandable.map((s) => s.key)));
+    setToggled(new Map(expandable.map((s) => [s.key, !allOpen] as const)));
   }
 
   return (
@@ -163,7 +162,7 @@ export function Stepper({ run }: StepperProps) {
             key={step.key}
             step={step}
             run={run}
-            open={open.has(step.key)}
+            open={isOpen(step)}
             onToggle={toggle}
             panelId={`${uid}-${step.key}-panel`}
             buttonId={`${uid}-${step.key}-button`}

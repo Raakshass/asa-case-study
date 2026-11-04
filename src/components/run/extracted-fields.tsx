@@ -2,6 +2,7 @@ import { Fragment, type ReactNode } from "react";
 import { LoaderCircle, Minus, TriangleAlert } from "lucide-react";
 import { ConfidenceChip } from "@/components/shared/confidence-chip";
 import { GroundedMark } from "@/components/shared/grounded-mark";
+import { Ident } from "@/components/shared/ident";
 import { TextSkeleton } from "@/components/shared/skeletons";
 import { TableFrame } from "@/components/shared/table-frame";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -122,10 +123,13 @@ interface FieldRow {
   problemKey: string;
 }
 
-function textOrNone(value: string | null, format?: (v: string) => string): ReactNode {
+function textOrNone(value: string | null, format?: (v: string) => ReactNode): ReactNode {
   const text = displayText(value, 300);
   return text === "" ? <Muted>Not found</Muted> : format ? format(text) : text;
 }
+
+/** An identifier is compared character by character, so it is set in the mono face. */
+const identOf = (v: string): ReactNode => <Ident>{v}</Ident>;
 
 function moneyOrNone(value: number | null, currency: string | null): ReactNode {
   const text = formatMoney(value, currency);
@@ -137,16 +141,16 @@ function buildRows(ex: InvoiceExtraction): FieldRow[] {
   const rows: FieldRow[] = [
     { key: "document_type", label: "Document type", problemKey: "document_type", value: textOrNone(ex.document_type, (v) => wordFor("document_type", v) ?? v) },
     { key: "vendor_name", label: "Vendor", problemKey: "vendor_name", value: textOrNone(ex.vendor_name), confidence: ex.confidence.vendor_name },
-    { key: "invoice_number", label: "Invoice number", problemKey: "invoice_number", value: textOrNone(ex.invoice_number), confidence: ex.confidence.invoice_number, grounded: "invoice_number" },
+    { key: "invoice_number", label: "Invoice number", problemKey: "invoice_number", value: textOrNone(ex.invoice_number, identOf), confidence: ex.confidence.invoice_number, grounded: "invoice_number" },
     { key: "invoice_date", label: "Invoice date", problemKey: "invoice_date", value: textOrNone(ex.invoice_date), confidence: ex.confidence.invoice_date },
     { key: "due_date", label: "Due date", problemKey: "due_date", value: textOrNone(ex.due_date) },
-    { key: "po_reference", label: "PO reference", problemKey: "po_reference", value: textOrNone(ex.po_reference), confidence: ex.confidence.po_reference, grounded: "po_reference" },
+    { key: "po_reference", label: "PO reference", problemKey: "po_reference", value: textOrNone(ex.po_reference, identOf), confidence: ex.confidence.po_reference, grounded: "po_reference" },
     { key: "currency", label: "Currency", problemKey: "currency", value: textOrNone(ex.currency) },
     { key: "subtotal", label: "Subtotal", problemKey: "subtotal", value: moneyOrNone(ex.subtotal, ex.currency) },
     { key: "tax", label: "Tax", problemKey: "tax", value: moneyOrNone(ex.tax, ex.currency) },
     { key: "total", label: "Total", problemKey: "total", value: moneyOrNone(ex.total, ex.currency), confidence: ex.confidence.total, grounded: "total" },
     { key: "tax_inclusive", label: "Amounts include tax", problemKey: "tax_inclusive", value: ex.tax_inclusive ? "Yes" : "No" },
-    { key: "bank_account", label: "Bank account", problemKey: "bank_account", value: textOrNone(ex.bank_account) },
+    { key: "bank_account", label: "Bank account", problemKey: "bank_account", value: textOrNone(ex.bank_account, identOf) },
   ];
   if (notes !== "") rows.push({ key: "notes", label: "Notes", problemKey: "notes", value: notes });
   const flagged = [

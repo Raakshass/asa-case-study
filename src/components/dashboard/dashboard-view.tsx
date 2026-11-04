@@ -84,7 +84,7 @@ export function DashboardView() {
   } else if (error) {
     body = <ErrorState title="Could not load the runs" message={error.message} onRetry={retry} retrying={retrying} />;
   } else {
-    body = <TableSkeleton rows={6} columns={6} label="Loading runs" />;
+    body = <TableSkeleton rows={6} columns={7} label="Loading runs" />;
   }
 
   const shown = data ? data.runs.length : null;
