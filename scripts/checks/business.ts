@@ -1371,6 +1371,7 @@ export async function run(t: Check): Promise<void> {
     const r = await amountsFor(seededSnapshot(), ex({ vendor_name: "Globex Logistics Ltd", bank_account: "ACC-77-8899", po_reference: "PO-1003", line_items: [{ description: "Freight services Q4 (lump sum)", quantity: 1, unit_price: 9000, amount: 9000 }], subtotal: 9000, tax: 900, total: 9900 }));
     t.eq([r.status, r.severity, r.remaining, r.overBy], ["fail", "hold", 6000, 3000]);
     t.ok(r.reason.startsWith("Exceeds remaining PO balance by $3,000.00. PO-1003: $30,000.00 total, $24,000.00 already approved (GLX-301, GLX-302), $6,000.00 remaining."), r.reason);
+    t.ok(r.reason.endsWith("is more than the 2% tolerance over the remaining balance."), r.reason);
     t.eq(r.detail?.approved_invoices, ["GLX-301", "GLX-302"]);
     t.eq([r.detail?.over_by, r.detail?.over_pct, r.detail?.already_approved, r.detail?.po_subtotal], [3000, 0.5, 24000, 30000]);
   });
