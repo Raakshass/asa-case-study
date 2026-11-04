@@ -14,6 +14,9 @@
  *      in the server build, so a marker that never matches anything cannot make this pass by accident.
  *   4. No source file outside src/lib/extract.ts reads OPENROUTER_API_KEY (src/ and scripts/; writing or deleting
  *      it, as scripts/test-extract.ts does, is not a read).
+ *   4b. Automations never write the decision tables (Automations plan D3): no statement in the automations code
+ *      inserts, updates or deletes runs, run_steps, invoices, purchase_orders, vendors or run_reviews, and it imports
+ *      neither the review module, insertInvoice, seedDatabase/seedFromData nor (other than as a type) the pipeline.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -187,12 +190,77 @@ function keyReads(): void {
   report(inExtract >= 1, `control: src/lib/extract.ts does read it (${inExtract} read)`);
 }
 
+/* ---- 4b. automations never write the decision tables (D3) ---------------------------------------- */
+
+/** A statement that writes a decision table: plain, quoted and main.-qualified names. */
+const DECISION_WRITE = /\b(INSERT(\s+OR\s+\w+)?\s+INTO|UPDATE(\s+OR\s+\w+)?|DELETE\s+FROM|REPLACE\s+INTO)\s+(main\.)?["'`\[]?(runs|run_steps|invoices|purchase_orders|vendors|run_reviews)\b/i;
+/** Names automations code must never import (they write invoices or wipe everything), and modules it may not import at all. */
+const FORBIDDEN_NAMES = /\b(insertInvoice|seedDatabase|seedFromData)\b/;
+const IMPORT_STATEMENT = /\bimport\s+(type\s+)?([^;]*?)\sfrom\s*["']([^"']+)["']/g;
+
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+}
+
+/** What is wrong with one source text, as short sentences (empty when it is fine). Pure, so the control below can test it. */
+function automationFindings(source: string): string[] {
+  const text = stripComments(source);
+  const found: string[] = [];
+  for (const [i, line] of text.split("\n").entries()) {
+    if (DECISION_WRITE.test(line)) found.push(`line ${i + 1}: writes a decision table: ${line.trim().slice(0, 80)}`);
+  }
+  // an SQL string may span lines: test the whole text too, with whitespace collapsed
+  if (found.length === 0 && DECISION_WRITE.test(text.replace(/\s+/g, " "))) found.push("writes a decision table (statement spans lines)");
+  for (const m of text.matchAll(IMPORT_STATEMENT)) {
+    const typeOnly = m[1] !== undefined;
+    const spec = m[3];
+    if (/(^|\/)review$/.test(spec)) found.push(`imports the review module (${spec})`);
+    if (!typeOnly && /(^|\/)pipeline$/.test(spec)) found.push(`imports the pipeline other than as a type (${spec})`);
+    if (FORBIDDEN_NAMES.test(m[2])) found.push(`imports ${m[2].trim().slice(0, 60)} from ${spec}`);
+  }
+  return found;
+}
+
+function automationsGuard(): void {
+  const files = [
+    ...walk(path.join(LIB, "automations"), (f) => CODE_RE.test(f)),
+    ...walk(path.join(SRC, "app", "api", "automations"), (f) => CODE_RE.test(f)),
+    ...walk(path.join(SRC, "app", "api", "runs", "[id]", "automations"), (f) => CODE_RE.test(f)),
+    ...["automation-views.ts"].map((n) => path.join(SRC, "app", "api", "_lib", n)).filter((f) => fs.existsSync(f)),
+  ];
+  const hits: string[] = [];
+  for (const file of files) for (const f of automationFindings(fs.readFileSync(file, "utf8"))) hits.push(`${rel(file)}: ${f}`);
+  report(hits.length === 0, `automations never write the decision tables (D3) (${files.length} files)`, hits.join("\n        "));
+  // control: the rule really matches what it is meant to catch, and lets the automations' own tables through
+  const caught = [
+    'db.exec("UPDATE runs SET decision = \'APPROVE\'")',
+    'db.prepare("DELETE FROM main.invoices")',
+    'db.prepare(`insert or replace into "vendors" values (1)`)',
+    'db.exec("INSERT INTO run_reviews (id) VALUES (1)")',
+    'import { reviewRun } from "../review";',
+    'import { runExclusive } from "../pipeline";',
+    'import { seedDatabase } from "../seed";',
+    'import { insertInvoice, x } from "../master";',
+  ];
+  const allowed = [
+    'db.prepare("UPDATE run_notes SET text = ?")',
+    'db.prepare("INSERT INTO workflow_executions (id) VALUES (?)")',
+    'db.prepare("DELETE FROM workflows WHERE id = ?")',
+    'import type { PipelineDeps } from "../pipeline";',
+    'import { poBalance, loadSnapshot } from "../master";',
+  ];
+  const missed = caught.filter((c) => automationFindings(c).length === 0);
+  const wrong = allowed.filter((c) => automationFindings(c).length > 0);
+  report(missed.length === 0 && wrong.length === 0, "control: the rule catches decision-table writes and forbidden imports and passes the automations' own tables", [...missed.map((m) => `not caught: ${m}`), ...wrong.map((w) => `wrongly caught: ${w}`)].join("\n        "));
+}
+
 function main(): number {
   console.log("check-static: source and bundle audits");
   bannedStrings();
   clientBoundary();
   bundle();
   keyReads();
+  automationsGuard();
   console.log(failures === 0 ? "\nAll static checks passed." : `\n${failures} static check(s) FAILED.`);
   return failures === 0 ? 0 : 1;
 }
