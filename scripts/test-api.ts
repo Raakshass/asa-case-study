@@ -3102,6 +3102,37 @@ async function automationsGroup(t: Check): Promise<void> {
     }
   });
 
+  await t.test("A11: a review starts the 'When a hold is resolved' automation whose filter lists its outcome: approving sample 5 writes the note, rejecting another hold writes nothing", async () => {
+    await resetViaRoute(t);
+    const db = getDb();
+    const w = listWorkflows(db).find((x) => x.seed_key === "chat-rejections") as { id: string };
+    const graph = {
+      nodes: [
+        { id: "start", type: "trigger.review_saved", name: "When a hold is resolved", position: { x: 0, y: 0 }, config: { actions: ["APPROVE"] } },
+        { id: "note", type: "action.note", name: "Note", position: { x: 280, y: 0 }, config: { text: "Approved after review: {{review.comment}}" } },
+      ],
+      edges: [{ id: "start-out-note", source: "start", sourceHandle: "out", target: "note" }],
+    };
+    db.prepare("UPDATE workflows SET graph = ?, trigger_type = 'review_saved', enabled = 1 WHERE id = ?").run(JSON.stringify(graph), w.id);
+    db.prepare("UPDATE workflows SET enabled = 0 WHERE id != ?").run(w.id);
+    const five = await runSampleViaRoute(t, "05-scanned-no-po.pdf");
+    const six = await runSampleViaRoute(t, "06-bank-change.pdf");
+    await automationsIdle();
+    t.eq(executionsForRun(db, five).length, 0, "a hold alone starts no review automation");
+    const approved = await reviewRoute.POST(postReview(five, { action: "APPROVE", comment: "Confirmed PO-1005 with the buyer by phone.", po_number: "PO-1005" }), idContext(five));
+    t.eq(approved.status, 200);
+    const rejected = await reviewRoute.POST(postReview(six, { action: "REJECT", comment: "The new bank details could not be verified." }), idContext(six));
+    t.eq(rejected.status, 200);
+    await automationsIdle();
+    t.eq(notesForRun(db, five).map((n) => n.text), ["Approved after review: Confirmed PO-1005 with the buyer by phone."]);
+    const ex = executionsForRun(db, five);
+    t.eq([ex.length, ex[0]?.trigger_type, ex[0]?.trigger_key, ex[0]?.status], [1, "review_saved", `review:${five}`, "success"]);
+    t.eq([executionsForRun(db, six).length, notesForRun(db, six).length], [0, 0], "a rejection is not in the filter");
+    t.eq((await reviewRoute.POST(postReview(five, { action: "APPROVE", comment: "Confirmed PO-1005 with the buyer by phone." }), idContext(five))).status, 409, "a second review is refused and starts nothing");
+    await automationsIdle();
+    t.eq(executionsForRun(db, five).length, 1);
+  });
+
   await t.test("a reset through the route removes executions, notes and assignments, and brings the seeds back", async () => {
     await resetViaRoute(t);
     const db = getDb();

@@ -245,6 +245,28 @@ export function dispatchRunFinished(deps: AutomationDeps, runId: string): void {
   }
 }
 
+/**
+ * After a person resolved a hold (the review route calls this after a 200): start every enabled "When a hold is resolved"
+ * automation whose outcome filter lists the review's action. Never throws and never waits. Keyed `review:<runId>`, so a
+ * run starts each automation at most once (a run can be reviewed only once anyway).
+ */
+export function dispatchReviewSaved(deps: AutomationDeps, runId: string): void {
+  try {
+    if (!ENV.automationsEnabled || control().paused) return;
+    const base = buildRunVars(deps.db, runId, deps.baseUrl, deps.now());
+    const review = buildReviewVars(deps.db, runId);
+    if (base === null || review === null) return;
+    const vars: Vars = { ...base, ...review };
+    for (const { row, graph } of enabledOf(deps.db, "review_saved")) {
+      const config = triggerConfig(graph, "trigger.review_saved");
+      if (config === null || !(config.actions as string[]).includes(String(review["review.action"]))) continue;
+      queueExecution(deps, row, { triggerType: "review_saved", triggerKey: `review:${runId}`, runId, mode: "live", vars });
+    }
+  } catch (e) {
+    logLine({ event: "automation_dispatch", status: "error", error: errorName(e) });
+  }
+}
+
 export type TestStart = { ok: true; executionId: string } | { ok: false; status: 400 | 404 | 409; error: string };
 
 /**

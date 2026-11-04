@@ -311,3 +311,10 @@ Entry format:
 - Tests: `scripts/smoke-http.ts` +1 (`/automations` sends the baseline headers and a CSP); the e2e of the existing pages still passes with the extra navigation link.
 - Why: Automations plan tasks A7 and A9.
 - Affects: every page has one more navigation link.
+
+## 2026-11-04 Automations A11 - src/lib/automations/engine.ts, src/app/api/runs/[id]/review/route.ts (the "When a hold is resolved" trigger)
+- Before: the review route (B4) answered and nothing else happened.
+- After: after a 200 the review route calls `dispatchReviewSaved(defaultAutomationDeps(getDb()), runId)` (it never throws and never waits): every enabled "When a hold is resolved" automation whose outcome filter lists the review's action gets one execution (trigger key `review:<runId>`, the invoice's values plus `review.action` and `review.comment`). A refused review (409) starts nothing. The editor offers the trigger only when the server has the review feature (`review_trigger_available`).
+- Tests: `scripts/test-api.ts` +1 (approving sample 5 writes "Approved after review: …"; rejecting another hold, outside the filter, writes nothing; a second review is refused and starts nothing).
+- Why: Automations plan task A11 (B4 is merged).
+- Affects: nobody unless an automation uses the trigger.

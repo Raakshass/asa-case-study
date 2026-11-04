@@ -4,6 +4,7 @@
  * pipeline's chain, so it never interleaves with a run that is spending PO balance. Next.js 15 passes `params` as a Promise.
  */
 import { z } from "zod";
+import { defaultAutomationDeps, dispatchReviewSaved } from "@/lib/automations/engine";
 import { getDb } from "@/lib/db";
 import { runExclusive } from "@/lib/pipeline";
 import { checkWriteLimit } from "@/lib/ratelimit";
@@ -39,6 +40,7 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
     }
     const outcome = await runExclusive(() => reviewRun(getDb(), parsedId.data, body));
     if (!outcome.ok) return apiError(outcome.status, outcome.error);
+    dispatchReviewSaved(defaultAutomationDeps(getDb()), parsedId.data); // never throws and never waits
     return json({ ok: true, review: outcome.review });
   } catch (e) {
     return serverError("POST /api/runs/:id/review", e);
