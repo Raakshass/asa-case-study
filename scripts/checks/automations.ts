@@ -37,6 +37,7 @@ import {
   startTestExecution,
   type AutomationDeps,
 } from "../../src/lib/automations/engine";
+import { latestSlot, tickSchedules, type ScheduleConfig } from "../../src/lib/automations/schedule";
 import { hostAllowed, isBlockedAddress, sendHttps, signPayload, type OutboundRequest, type OutboundResponse } from "../../src/lib/automations/send";
 import { buildRunVars, buildSummaryVars } from "../../src/lib/automations/vars";
 import { CONFIG } from "../../src/lib/config";
@@ -1269,6 +1270,91 @@ export async function run(t: Check): Promise<void> {
       t.eq(fake.calls[0].destroyedWith.length, 1, "the connection was destroyed");
     } finally {
       (CONFIG as { automationStepTimeoutMs: number }).automationStepTimeoutMs = real;
+    }
+  });
+
+  /* ---------------------------------------------------------------------------- A12: the scheduler */
+
+  await t.test("A12: latestSlot: a day schedule gives today's time or yesterday's, an hour schedule this hour's minute or the previous hour's", () => {
+    const day: ScheduleConfig = { every: "day", hour: 8, minute: 0 };
+    const at = (iso: string) => new Date(iso);
+    t.eq(latestSlot(day, at("2026-11-02T07:59:00.000Z")).toISOString(), "2026-11-01T08:00:00.000Z", "before 08:00: yesterday");
+    t.eq(latestSlot(day, at("2026-11-02T08:00:00.000Z")).toISOString(), "2026-11-02T08:00:00.000Z", "at 08:00: today");
+    t.eq(latestSlot(day, at("2026-11-02T23:59:59.999Z")).toISOString(), "2026-11-02T08:00:00.000Z");
+    t.eq(latestSlot(day, at("2026-01-01T00:00:00.000Z")).toISOString(), "2025-12-31T08:00:00.000Z", "across a year");
+    t.eq(latestSlot({ every: "day", hour: 23, minute: 45 }, at("2026-03-01T10:00:00.000Z")).toISOString(), "2026-02-28T23:45:00.000Z", "across a month");
+    const hour: ScheduleConfig = { every: "hour", hour: 0, minute: 15 };
+    t.eq(latestSlot(hour, at("2026-11-02T10:14:00.000Z")).toISOString(), "2026-11-02T09:15:00.000Z");
+    t.eq(latestSlot(hour, at("2026-11-02T10:15:00.000Z")).toISOString(), "2026-11-02T10:15:00.000Z");
+    t.eq(latestSlot(hour, at("2026-11-02T00:10:00.000Z")).toISOString(), "2026-11-01T23:15:00.000Z", "across midnight");
+  });
+
+  await t.test("A12: a tick starts an enabled schedule automation once per slot, never for a slot before it was turned on, never a storm after downtime, and not when it is off", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      let clock = new Date("2026-11-02T08:30:00.000Z");
+      const deps = depsFor(db, { now: () => clock });
+      const daily = workflowBySeed(db, "daily-holds");
+      const executionsOf = () => listExecutions(db, daily.id, 50).map((e) => e.trigger_key).sort();
+      t.eq(tickSchedules(deps), 0, "off: nothing");
+      setEnabled(db, daily.id, true, "2026-11-02T08:10:00.000Z");
+      t.eq(tickSchedules(deps), 0, "its latest slot (08:00) is before it was turned on (08:10)");
+      clock = new Date("2026-11-03T08:00:30.000Z");
+      t.eq(tickSchedules(deps), 1, "the 08:00 slot of the next day");
+      await automationsIdle();
+      t.eq(tickSchedules(deps), 0, "a second tick in the same slot does nothing");
+      clock = new Date("2026-11-03T20:00:00.000Z");
+      t.eq(tickSchedules(deps), 0, "still the same slot");
+      t.eq(executionsOf(), ["schedule:2026-11-03T08:00:00.000Z"]);
+      const ex = listExecutions(db, daily.id, 1)[0];
+      t.eq([ex.status, ex.trigger_type, ex.mode, ex.run_id, JSON.parse(ex.vars)["now.date"]], ["success", "schedule", "live", null, "2026-11-03"]);
+      // five days of downtime: one execution for the latest slot, not five
+      clock = new Date("2026-11-08T09:00:00.000Z");
+      t.eq(tickSchedules(deps), 1);
+      await automationsIdle();
+      t.eq(executionsOf(), ["schedule:2026-11-03T08:00:00.000Z", "schedule:2026-11-08T08:00:00.000Z"], "only the latest slot ran");
+      // turned off: nothing
+      setEnabled(db, daily.id, false, clock.toISOString());
+      clock = new Date("2026-11-09T09:00:00.000Z");
+      t.eq(tickSchedules(deps), 0);
+      // switched off for the whole server
+      setEnabled(db, daily.id, true, "2026-11-09T00:00:00.000Z");
+      const was = process.env.AUTOMATIONS_ENABLED;
+      process.env.AUTOMATIONS_ENABLED = "false";
+      try {
+        t.eq(tickSchedules(deps), 0, "AUTOMATIONS_ENABLED=false");
+      } finally {
+        if (was === undefined) delete process.env.AUTOMATIONS_ENABLED;
+        else process.env.AUTOMATIONS_ENABLED = was;
+      }
+      t.eq(tickSchedules(deps), 1, "and back on");
+      await automationsIdle();
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("A12: an hourly schedule fires once an hour at its minute; a run-triggered automation is never fired by a tick", async () => {
+    const db = openSeededMemoryDb();
+    try {
+      let clock = new Date("2026-11-02T10:20:00.000Z");
+      const deps = depsFor(db, { now: () => clock });
+      const daily = workflowBySeed(db, "daily-holds");
+      const graph = JSON.parse(daily.graph) as Graph;
+      (graph.nodes[0].config as Record<string, unknown>) = { every: "hour", hour: 0, minute: 15 };
+      db.prepare("UPDATE workflows SET graph = ? WHERE id = ?").run(JSON.stringify(graph), daily.id);
+      setEnabled(db, daily.id, true, "2026-11-02T10:00:00.000Z");
+      t.eq(tickSchedules(deps), 1, "10:15 is after it was turned on at 10:00");
+      t.eq(tickSchedules(deps), 0);
+      clock = new Date("2026-11-02T11:14:00.000Z");
+      t.eq(tickSchedules(deps), 0, "11:15 has not come");
+      clock = new Date("2026-11-02T11:15:00.000Z");
+      t.eq(tickSchedules(deps), 1);
+      await automationsIdle();
+      t.eq(listExecutions(db, daily.id, 10).map((e) => e.trigger_key).sort(), ["schedule:2026-11-02T10:15:00.000Z", "schedule:2026-11-02T11:15:00.000Z"]);
+      t.eq(listExecutions(db, workflowBySeed(db, "route-holds").id, 10).length, 0, "the run-triggered seed is not a schedule");
+    } finally {
+      db.close();
     }
   });
 }

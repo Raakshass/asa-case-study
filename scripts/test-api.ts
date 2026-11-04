@@ -31,7 +31,8 @@ import { deflateSync } from "node:zlib";
 import { PDFDocument, PDFName } from "pdf-lib";
 import { z } from "zod";
 import { automationsIdle, dispatchRunFinished, type AutomationDeps } from "../src/lib/automations/engine";
-import { assignmentForRun, executionsForRun, getExecution, listWorkflows, notesForRun } from "../src/lib/automations/store";
+import { tickSchedules } from "../src/lib/automations/schedule";
+import { assignmentForRun, executionsForRun, getExecution, listWorkflows, notesForRun, setEnabled } from "../src/lib/automations/store";
 import { CONFIG, paths, uploadPath } from "../src/lib/config";
 import { type DB, INTERRUPTED_NEXT_ACTION, INTERRUPTED_REASON, getDb, openDb } from "../src/lib/db";
 import { normId } from "../src/lib/format";
@@ -2813,6 +2814,27 @@ async function automationsGroup(t: Check): Promise<void> {
     ]);
     t.eq(withAll.sent.length, 2, "the two rejected samples (4 and 8) were posted to the chat");
     t.ok(withAll.sent.every((s) => s.url === "https://hooks.example.com/T000/B000/rej1" && s.text.startsWith("Rejected: ")), "to the rejection automation's URL");
+  });
+
+  await t.test("A12: the morning summary (seed 3, on, with a URL) posts one chat message listing the two holds of the window", async () => {
+    const rig = makeRig();
+    const sender = recordingSender();
+    for (const file of ["03-split-po-overbill.pdf", "05-scanned-no-po.pdf"] as const) {
+      await enqueue(rig.run(sampleBytes(file), file), rig.deps());
+    }
+    setSeedUrl(rig.db, "daily-holds", "chat", "https://hooks.example.com/T000/B000/day1");
+    // the rig's clock is FIXED_NOW (2026-11-02 12:00 UTC): the runs finished then, the slot is 08:00 the same day
+    const deps = autoDeps(rig.db, sender.send, { now: () => new Date(FIXED_NOW.getTime() + 2 * 3_600_000) }); // 14:00
+    const daily = listWorkflows(rig.db).find((w) => w.seed_key === "daily-holds") as { id: string };
+    setEnabled(rig.db, daily.id, true, new Date(FIXED_NOW.getTime() - 24 * 3_600_000).toISOString());
+    t.eq(tickSchedules(deps), 1);
+    await automationsIdle();
+    const sent = sender.sent.filter((m) => m.url.endsWith("/day1"));
+    t.eq(sent.length, 1, "one chat send");
+    t.ok(sent[0].text.startsWith("2 invoices on hold in the last 24 hours ($11,550.00):"), sent[0].text);
+    t.includes(sent[0].text, "GLX-303, Globex Logistics Ltd, $9,900.00");
+    t.includes(sent[0].text, "IF-2210");
+    t.eq(tickSchedules(deps), 0, "the same slot is not sent twice");
   });
 
   await t.test("a reset through the route removes executions, notes and assignments, and brings the seeds back", async () => {

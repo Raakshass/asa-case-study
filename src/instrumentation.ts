@@ -17,6 +17,9 @@ export async function register(): Promise<void> {
       const db = getDb();
       const count = (table: "vendors" | "runs"): number => db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get() as number;
       console.log(JSON.stringify({ event: "startup", db: "ready", vendors: count("vendors"), runs: count("runs") }));
+      // Scheduled automations (logs nothing; a no-op when automations are off or AUTOMATION_SCHEDULER=off)
+      const { startScheduler } = await import("./lib/automations/schedule");
+      startScheduler();
     } catch (e) {
       const raw = e instanceof Error ? e.name : "Error";
       console.error(JSON.stringify({ event: "startup", db: "failed", error: raw.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 40) }));
