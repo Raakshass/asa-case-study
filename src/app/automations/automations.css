@@ -1,0 +1,319 @@
+/*
+ * The automation editor's canvas (plan 8.1): a ledger sheet with the steps drawn as index cards. Back office, so quiet paperwork:
+ * ink and graphite on white, hairlines, no glow, no dot grid, and no motion except React Flow's own pan and zoom.
+ *
+ * Imported by src/components/automations/editor.tsx only, right after "@xyflow/react/dist/base.css" (which has the structural
+ * rules but almost no look). Every rule is scoped under .automation-canvas, the wrapper that canvas.tsx draws, so nothing here
+ * can reach another page. The colours are the tokens of src/app/globals.css.
+ */
+
+/* ---- The sheet ---------------------------------------------------------------------------------------------------- */
+
+.automation-canvas {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--card);
+  /* faint horizontal rules every 28 px, like a ledger */
+  background-image: linear-gradient(to bottom, color-mix(in srgb, var(--border) 45%, transparent) 1px, transparent 1px);
+  background-size: 100% 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* React Flow's own surface is clear, so the ruled sheet shows through; its variables take the app's tokens. */
+.automation-canvas .react-flow {
+  background: transparent;
+  font-family: inherit;
+  --xy-background-color: transparent;
+  --xy-edge-stroke: var(--muted-foreground);
+  --xy-edge-stroke-width: 1.5;
+  --xy-edge-stroke-selected: var(--foreground);
+  --xy-connectionline-stroke: var(--foreground);
+  --xy-connectionline-stroke-width: 1.5;
+  --xy-handle-background-color: var(--card);
+  --xy-attribution-background-color: color-mix(in srgb, var(--card) 85%, transparent);
+}
+.automation-canvas .react-flow__pane,
+.automation-canvas .react-flow__renderer {
+  background: transparent;
+}
+
+/* ---- Nodes: selection and keyboard focus --------------------------------------------------------------------------- */
+
+.automation-canvas .react-flow__node {
+  border-radius: var(--radius);
+}
+/* selection is a 2 px ring with a 2 px offset; keyboard focus draws the same ring */
+.automation-canvas .react-flow__node.selected,
+.automation-canvas .react-flow__node:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* ---- The index card ------------------------------------------------------------------------------------------------ */
+
+.automation-canvas .step-card {
+  position: relative;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  width: 240px;
+  background: var(--card);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  /* paper on paper: one hairline under the card, no soft glow */
+  box-shadow: 0 1px 0 var(--border);
+  text-align: left;
+}
+
+.automation-canvas .step-card__main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+.automation-canvas .step-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* the kind is told by a 28 px tile and by the icon's shape, never by a coloured edge */
+.automation-canvas .step-card__tile {
+  box-sizing: border-box;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius);
+}
+.automation-canvas .step-card__tile[data-kind="trigger"] {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+.automation-canvas .step-card__tile[data-kind="logic"] {
+  background: var(--card);
+  color: var(--foreground);
+  border: 1px solid var(--foreground);
+}
+.automation-canvas .step-card__tile[data-kind="data"] {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+.automation-canvas .step-card__tile[data-kind="action"] {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.automation-canvas .step-card__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.automation-canvas .step-card__alert {
+  display: inline-flex;
+  flex: none;
+  color: var(--reject);
+}
+
+.automation-canvas .step-card__summary {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+/* history overlay: the third line */
+.automation-canvas .step-card__status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--foreground);
+}
+.automation-canvas .step-card__status-icon {
+  display: inline-flex;
+}
+
+/* the words of each output, down the right edge, level with its handle */
+.automation-canvas .step-card__outputs {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  padding-right: 16px;
+}
+.automation-canvas .step-card__output {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 24px;
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+}
+
+/* problems: a reject border (the card also carries an icon and the words "has problems") */
+.automation-canvas .step-card[data-has-problems="true"],
+.automation-canvas .step-card[data-exec-status="error"] {
+  border-color: var(--reject);
+  box-shadow: 0 1px 0 var(--reject);
+}
+/* a step that did not run: faint and dashed */
+.automation-canvas .step-card[data-exec-status="skipped"],
+.automation-canvas .step-card[data-exec-status="not-run"] {
+  opacity: 0.55;
+  border-style: dashed;
+  box-shadow: none;
+}
+
+/* ---- Handles: 12 px circles with a 2 px ink border and a 24 px invisible hit area ---------------------------------- */
+
+.automation-canvas .react-flow__handle {
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  min-height: 12px;
+  background: var(--card);
+  border: 2px solid var(--foreground);
+  border-radius: 50%;
+}
+.automation-canvas .react-flow__handle::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+/* centre each handle on the card's 1 px border */
+.automation-canvas .react-flow__handle-left {
+  left: -1px;
+}
+.automation-canvas .react-flow__handle-right {
+  right: -1px;
+}
+.automation-canvas .react-flow__handle.connectionindicator:hover,
+.automation-canvas .react-flow__handle.connectingfrom {
+  background: var(--foreground);
+}
+.automation-canvas .react-flow__handle.connectingto.valid {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+.automation-canvas .react-flow__handle.connectingto:not(.valid) {
+  border-color: var(--reject);
+}
+
+/* ---- Connections --------------------------------------------------------------------------------------------------- */
+
+.automation-canvas .react-flow__edge .react-flow__edge-path {
+  stroke-linecap: round;
+}
+/* history overlay: taken connections are 2 px ink, the others dashed rule colour */
+.automation-canvas .react-flow__edge .react-flow__edge-path.is-taken {
+  stroke: var(--foreground);
+  stroke-width: 2px;
+}
+.automation-canvas .react-flow__edge .react-flow__edge-path.is-not-taken {
+  stroke: var(--border);
+  stroke-dasharray: 5 4;
+}
+/* a selected connection is 2 px ink (after the overlay rules, so it wins when both apply) */
+.automation-canvas .react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--foreground);
+  stroke-width: 2px;
+  stroke-dasharray: none;
+}
+
+/* the label of an output, once, at the middle of its connection: the one pill, like an annotation on a form */
+.automation-canvas .automation-edge-label {
+  box-sizing: border-box;
+  padding: 3px 8px;
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  border-radius: 9999px;
+  box-shadow: 0 0 0 1px var(--border);
+}
+.automation-canvas .automation-edge-label.is-not-taken {
+  color: var(--muted-foreground);
+}
+
+/* ---- Our own zoom buttons (React Flow's Controls are smaller than 24 px) -------------------------------------------- */
+
+.automation-canvas .automation-zoom {
+  display: flex;
+  gap: 4px;
+  margin: 12px;
+}
+.automation-canvas .automation-zoom button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  background: var(--card);
+  color: var(--foreground);
+  border: 1px solid var(--input);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.automation-canvas .automation-zoom button:hover {
+  background: var(--muted);
+}
+.automation-canvas .automation-zoom button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* ---- The library's attribution: kept, in 12 px graphite ------------------------------------------------------------- */
+
+.automation-canvas .react-flow__attribution {
+  margin: 0;
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.automation-canvas .react-flow__attribution a {
+  color: var(--muted-foreground);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.automation-canvas .react-flow__attribution a:hover {
+  color: var(--foreground);
+}
+.automation-canvas .react-flow__attribution a:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
