@@ -356,6 +356,8 @@ export const DECISION_WORDS: Readonly<Record<string, string>> = { APPROVE: "Appr
  * ============================================================================================== */
 
 const TOKEN = /\{\{\s*([a-z_]+(?:\.[a-z_]+)+)\s*\}\}/g;
+/** The {{name}} pattern, for the editor's preview (global: use with String.replace, which resets it). */
+export const TEMPLATE_TOKEN = TOKEN;
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 
 /** Every {{name}} in a template, in order, duplicates removed. */

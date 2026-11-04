@@ -26,6 +26,21 @@ import {
   writeStep,
   type ExecutionRow,
 } from "../../src/lib/automations/store";
+import {
+  addStepAfter,
+  addStepAt,
+  connect,
+  duplicateStep,
+  freeOutputs,
+  incoming,
+  outlineRows,
+  removeEdge,
+  removeStep,
+  renameStep,
+  replaceTrigger,
+  setConfig,
+  setPosition,
+} from "../../src/components/automations/graph-edit";
 import { EventEmitter } from "node:events";
 import type https from "node:https";
 import crypto from "node:crypto";
@@ -1356,5 +1371,128 @@ export async function run(t: Check): Promise<void> {
     } finally {
       db.close();
     }
+  });
+
+  /* ---------------------------------------------------------------------------- A10: graph-edit */
+
+  await t.test("A10: addStepAfter connects from the requested output, places the step 280 px right and 140 px below a sibling, and always gives a graph the server reads", () => {
+    const g = inlineSeeds().route;
+    const before = JSON.stringify(g);
+    const added = addStepAfter(g, "if-security", "false", "action.note");
+    t.eq(JSON.stringify(g), before, "the input graph is untouched");
+    t.eq(added.id, "note-1");
+    const created = added.graph.nodes.find((n) => n.id === "note-1") as GraphNode;
+    const sibling = g.nodes.find((n) => n.id === "if-large") as GraphNode;
+    t.eq(created.position, { x: 280 + 280, y: sibling.position.y + 140 }, "right of the parent, below the previous child on that output");
+    t.ok(added.graph.edges.some((e) => e.source === "if-security" && e.sourceHandle === "false" && e.target === "note-1"), "connected from the false output");
+    t.ok(!added.graph.edges.some((e) => e.source === "if-security" && e.sourceHandle === "true" && e.target === "note-1"), "and not from the other one");
+    t.eq([created.name, created.config], ["Add a note to the invoice", { text: "" }]);
+    const first = addStepAfter(inlineSeeds().chat, "chat", "out", "action.chat");
+    t.eq(first.graph.nodes.find((n) => n.id === first.id)?.position, { x: 560, y: 0 }, "the first child sits level with its parent");
+    t.eq(addStepAfter(g, null, "out", "action.note").graph.edges.length, g.edges.length, "no parent: not connected");
+    t.eq(addStepAfter(g, "start", "bogus", "action.note").graph.edges.length, g.edges.length, "an output the parent lacks: not connected");
+    t.eq(messages(addStepAfter(addStepAfter(g, "assign-clerk", "out", "action.note").graph, "assign-lead", "out", "action.note").graph).length, 2, "two empty notes: two problems, no structural one");
+    let threw = false;
+    try {
+      addStepAfter(g, "start", "out", "trigger.schedule");
+    } catch {
+      threw = true;
+    }
+    t.ok(threw, "a starting step is not added like this");
+    const at = addStepAt(g, "action.chat", 123.6, -40.2);
+    t.eq([at.graph.nodes.find((n) => n.id === at.id)?.position, at.graph.edges.length], [{ x: 124, y: -40 }, g.edges.length], "dropped at the pointer, unconnected");
+  });
+
+  await t.test("A10: connect refuses a cycle, a duplicate, a connection into the trigger, to itself, and from an output the step lacks", () => {
+    const g = inlineSeeds().route;
+    const ok = connect(g, "assign-clerk", "out", "note-security");
+    t.ok(ok.ok && ok.graph.edges.length === g.edges.length + 1, "a new connection is made");
+    const refuse = (r: ReturnType<typeof connect>, error: string, what: string) => t.eq(r.ok ? "accepted" : r.error, error, what);
+    refuse(connect(g, "assign-lead", "out", "if-large"), "That connection would make the steps go round in a circle.", "cycle");
+    refuse(connect(g, "if-large", "true", "if-large"), "A step cannot connect to itself.", "to itself");
+    refuse(connect(g, "if-large", "true", "assign-lead"), "These two steps are already connected that way.", "duplicate");
+    refuse(connect(g, "assign-lead", "out", "start"), "Nothing can lead into the starting step.", "into the trigger");
+    refuse(connect(g, "assign-lead", "yes", "note-security"), "That step has no such output.", "bad output");
+    refuse(connect(g, "ghost", "out", "note-security"), "That step does not exist.", "missing step");
+    t.ok(connect(g, "if-large", "false", "assign-lead").ok, "the other output of the same step may lead to the same target");
+    t.ok(connect(g, "assign-lead", "out", "assign-clerk").ok);
+  });
+
+  await t.test("A10: removeStep removes its connections; the starting step stays; removeEdge removes one connection", () => {
+    const g = inlineSeeds().route;
+    const without = removeStep(g, "if-large");
+    t.eq(without.nodes.some((n) => n.id === "if-large"), false);
+    t.eq(without.edges.filter((e) => e.source === "if-large" || e.target === "if-large").length, 0, "no dangling connection");
+    t.eq(without.edges.length, g.edges.length - 3, "its three connections went");
+    t.eq(removeStep(g, "start"), g, "the starting step cannot be removed");
+    t.eq(removeStep(g, "ghost"), g);
+    t.eq(removeEdge(g, "if-large-true-assign-lead").edges.length, g.edges.length - 1);
+    t.eq(messages(without), ["This step is not connected to the start.", "This step is not connected to the start."], "the two steps below it are now loose");
+  });
+
+  await t.test("A10: duplicateStep copies the settings under a fresh id, 40 px right and down, connected to nothing; rename, config and position change one step", () => {
+    const g = inlineSeeds().route;
+    const dup = duplicateStep(g, "assign-lead");
+    t.ok(dup !== null);
+    if (dup === null) return;
+    const copy = dup.graph.nodes.find((n) => n.id === dup.id) as GraphNode;
+    t.eq([dup.id, copy.name, copy.config, copy.position], ["assign-1", "Assign to AP lead copy", { assignee: "AP lead" }, { x: 880, y: 80 }]);
+    t.eq(dup.graph.edges, g.edges, "no new connection");
+    (copy.config as { assignee: string }).assignee = "changed";
+    t.eq((g.nodes.find((n) => n.id === "assign-lead")?.config as { assignee: string }).assignee, "AP lead", "a deep copy");
+    t.eq(duplicateStep(g, "start"), null);
+    t.eq(duplicateStep(g, "ghost"), null);
+    t.eq(renameStep(g, "assign-lead", "  Hand to the lead ").nodes.find((n) => n.id === "assign-lead")?.name, "Hand to the lead");
+    t.eq(renameStep(g, "assign-lead", "   "), g, "an empty name keeps the old one");
+    t.eq(setConfig(g, "assign-lead", { assignee: "Sam" }).nodes.find((n) => n.id === "assign-lead")?.config, { assignee: "Sam" });
+    t.eq(setPosition(g, "start", 1e9, -1e9).nodes[0].position, { x: 100000, y: -100000 }, "kept inside the schema's range");
+  });
+
+  await t.test("A10: replaceTrigger keeps the starting step's id, place and outgoing connections and resets its settings", () => {
+    const g = inlineSeeds().route;
+    const swapped = replaceTrigger(g, "trigger.schedule");
+    const start = swapped.nodes.find((n) => n.id === "start") as GraphNode;
+    t.eq([start.type, start.name, start.config, start.position], ["trigger.schedule", "On a schedule", { every: "day", hour: 8, minute: 0 }, { x: 0, y: 0 }]);
+    t.eq(swapped.edges, g.edges, "the connections stay");
+    t.eq(swapped.nodes.length, g.nodes.length);
+    const none = replaceTrigger({ nodes: [], edges: [] }, "trigger.run_finished");
+    t.eq([none.nodes.length, none.nodes[0].id, none.nodes[0].type], [1, "start-1", "trigger.run_finished"]);
+    t.eq(messages(swapped).some((m) => m.includes("runs on a schedule")), true, "steps that need an invoice are now reported");
+  });
+
+  await t.test("A10: freeOutputs and incoming report what is not connected and what leads into a step", () => {
+    const g = inlineSeeds().route;
+    t.eq(freeOutputs(g, "if-large"), []);
+    t.eq(freeOutputs(g, "assign-lead"), ["out"]);
+    t.eq(freeOutputs(removeEdge(g, "if-large-false-assign-clerk"), "if-large"), ["false"]);
+    t.eq(incoming(g, "if-large").map((i) => [i.from.id, i.edge.sourceHandle]), [["if-security", "false"]]);
+    t.eq(incoming(g, "start"), []);
+  });
+
+  await t.test("A10: outlineRows draws a tree from the start under each parent's output label; loose steps come last; a step with two parents says so", () => {
+    const g = inlineSeeds().route;
+    const rows = outlineRows(g);
+    const text = rows.map((r) => (r.kind === "label" ? `${"  ".repeat(r.depth)}${r.text}` : r.kind === "step" ? `${"  ".repeat(r.depth)}${r.number} ${r.node.id}` : `loose ${r.number} ${r.node.id}`));
+    t.eq(text, [
+      "1 start",
+      "  2 if-security",
+      "    Yes:",
+      "      3 assign-security",
+      "        4 note-security",
+      "    No:",
+      "      5 if-large",
+      "        Yes:",
+      "          6 assign-lead",
+      "        No:",
+      "          7 assign-clerk",
+    ]);
+    const joined = connect(g, "assign-clerk", "out", "note-security");
+    if (!joined.ok) throw new Error(joined.error);
+    const two = outlineRows(joined.graph).find((r) => r.kind === "step" && r.node.id === "note-security");
+    t.eq(two?.kind === "step" ? two.alsoFrom : null, ["Assign to AP clerk"], "listed once, with the other parent named");
+    const loose = addStepAt(g, "action.note", 600, 400).graph;
+    const last = outlineRows(loose).at(-1);
+    t.eq([last?.kind, last?.kind === "loose" ? last.node.id : null, last?.kind === "loose" ? last.number : null], ["loose", "note-1", 8]);
+    t.eq(outlineRows({ nodes: [], edges: [] }), []);
   });
 }
