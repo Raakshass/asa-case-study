@@ -3,20 +3,23 @@
 @import "shadcn/tailwind.css";
 
 /*
- * Design tokens for the invoice-approval UI, "the AP desk" (owner: UI-foundation).
+ * Design tokens for Tollgate, the invoice-approval UI. Since 2026-11-10 the theme is dark ("aurora": a night background,
+ *   a teal-violet-coral brand gradient used sparingly), at the owner's request; the earlier light "AP desk" palette is in
+ *   git history. The values are in :root below, with their measured contrast.
  *
- * - Light theme only. Nothing in the app sets `.dark`, so the shadcn `dark:` variants stay inert on purpose
+ * - One theme only (dark). Nothing in the app sets `.dark`, so the shadcn `dark:` variants stay inert on purpose
  *   (without the `@custom-variant dark` line below Tailwind would apply them whenever the OS is in dark
  *   mode and mix both themes).
- * - Palette: ink on paper. Cool grey-green paper page, white sheets, ink text, ONE action colour: the Prussian
- *   blue `--primary`. shadcn's `--accent` is NOT a second brand colour: it is the pale tint of the same blue
- *   used for hover surfaces and the active nav item.
+ * - Palette: a night page, slightly lighter cards, light text, ONE action colour: the light violet `--primary` (dark text on it). The brand
+ *   gradient (`--brand-1..3`, utilities .brand-fill, .brand-text, .brand-border, .cta-gradient) is decoration for the
+ *   logo, the hero and the main call to action only. shadcn's `--accent` is the dark violet tint for hover surfaces
+ *   and the active nav item, not a second brand colour.
  * - Decision colours are semantic tokens (approve green, hold amber, reject red) plus one for security flags
  *   (violet). They are also used for step statuses (pass / warn / fail). Colour is never the only signal:
  *   every use pairs it with an icon and a text label (see src/components/shared).
  * - Every text/background pair below is checked for WCAG AA (4.5:1; badges and banners aim for 5:1 or better).
- *   Measured on white: ink 15.6, graphite 6.0, prussian 8.6, approve 6.7, hold 5.4, reject 6.6, security 9.3;
- *   the form-field border is 3.1:1 (WCAG 1.4.11).
+ *   Measured on the card: text 15.0, muted 7.2, approve 10.1, hold 10.1, reject 7.2, security 8.5; the primary
+ *   6.5 as text and 6.9 under its dark button text; the form-field border is 3.1:1 (WCAG 1.4.11). The e2e runs axe (colour contrast included) on every page.
  * - Fonts are self-hosted (src/app/fonts, SIL Open Font License): Atkinson Hyperlegible Next for text and
  *   Atkinson Hyperlegible Mono for identifiers that are compared character by character (invoice and PO
  *   numbers, bank accounts, hashes). No request leaves the app, so it works offline and under the strict CSP.
@@ -140,67 +143,74 @@
 }
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
 
-  /* AP desk palette. Measured contrast on white: ink 15.6:1, graphite 6.0:1, prussian 8.6:1,
-     approve 6.7:1, hold 5.4:1, reject 6.6:1, security 9.3:1, field border 3.1:1. */
-  --background: #eef1f0; /* paper */
-  --foreground: #18233a; /* ink */
-  --card: #ffffff; /* sheet */
-  --card-foreground: #18233a;
-  --popover: #ffffff;
-  --popover-foreground: #18233a;
-  --secondary: #e6ecf5;
-  --secondary-foreground: #18233a;
-  --muted: #f3f5f5;
-  --muted-foreground: #5a6472; /* graphite */
-  --border: #cdd3d6; /* rule */
-  --input: #8a949c; /* form-field border, >= 3:1 on white (WCAG 1.4.11) */
+  /* Tollgate "aurora" palette (dark). Measured contrast on the card (#121725): text 15.0:1, muted 7.2:1, link 9.4:1,
+     approve 10.1:1, hold 10.1:1, reject 7.2:1, security 8.5:1, field border 3.1:1; the primary 6.5:1 as text, its
+     dark button text 6.9:1. */
+  --background: #0b0e17; /* night */
+  --foreground: #e8ebf4;
+  --card: #121725;
+  --card-foreground: #e8ebf4;
+  --popover: #161b2a;
+  --popover-foreground: #e8ebf4;
+  --secondary: #1b2132;
+  --secondary-foreground: #e8ebf4;
+  --muted: #171c2b;
+  --muted-foreground: #9ba5bb;
+  --border: #262e42;
+  --input: #5e6a85; /* form-field border, >= 3:1 on the card (WCAG 1.4.11) */
 
-  --primary: #1e4c8f; /* prussian: the one action colour */
-  --primary-foreground: #ffffff;
-  --accent: #e6ecf5; /* prussian tint: hover surfaces, active nav */
-  --accent-foreground: #163a6e;
-  --ring: #1e4c8f;
+  --primary: #9d8cff; /* the one action colour: 6.5:1 as text on the card, dark text on it 6.9:1 */
+  --primary-foreground: #0f0b26;
+  --accent: #211e42; /* hover surfaces, the active nav item */
+  --accent-foreground: #cfc8ff;
+  --ring: #a99dff;
 
-  --destructive: #b42318;
+  --destructive: #ff7a8a;
 
-  --approve: #17694a;
-  --approve-soft: #eaf4ef;
-  --approve-border: #9ccbb4;
-  --approve-solid: #17694a;
-  --approve-solid-foreground: #ffffff;
-  --hold: #9a5b00;
-  --hold-soft: #fbf3e4;
-  --hold-border: #e2be7f;
-  --hold-solid: #9a5b00;
-  --hold-solid-foreground: #ffffff;
-  --reject: #b42318;
-  --reject-soft: #fbecea;
-  --reject-border: #e8a39d;
-  --reject-solid: #b42318;
-  --reject-solid-foreground: #ffffff;
-  --security: #5e2b97;
-  --security-soft: #f2ecf9;
-  --security-border: #c3a9e3;
-  --security-solid: #5e2b97;
-  --security-solid-foreground: #ffffff;
+  /* the brand gradient: teal -> violet -> coral */
+  --brand-1: #2dd4bf;
+  --brand-2: #7c6cff;
+  --brand-3: #ff7a6b;
+  --glow: rgba(124, 108, 255, 0.18);
 
-  --chart-1: #1e4c8f;
-  --chart-2: #3f6aa8;
-  --chart-3: #6f8fbf;
-  --chart-4: #a3b8d8;
-  --chart-5: #d3dcec;
-  --radius: 0.375rem;
+  --approve: #3ddc97;
+  --approve-soft: #11281f;
+  --approve-border: #1f6b4c;
+  --approve-solid: #3ddc97;
+  --approve-solid-foreground: #06140e;
+  --hold: #f5b84a;
+  --hold-soft: #2a2111;
+  --hold-border: #7a5a1c;
+  --hold-solid: #f5b84a;
+  --hold-solid-foreground: #1c1200;
+  --reject: #ff7a8a;
+  --reject-soft: #2c1418;
+  --reject-border: #8a3442;
+  --reject-solid: #ff7a8a;
+  --reject-solid-foreground: #2a0a0f;
+  --security: #b9a6ff;
+  --security-soft: #1e1836;
+  --security-border: #5a4a9e;
+  --security-solid: #b9a6ff;
+  --security-solid-foreground: #140c2e;
 
-  --sidebar: #eef1f0;
-  --sidebar-foreground: #18233a;
-  --sidebar-primary: #1e4c8f;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #e6ecf5;
-  --sidebar-accent-foreground: #163a6e;
-  --sidebar-border: #cdd3d6;
-  --sidebar-ring: #1e4c8f;
+  --chart-1: #7c6cff;
+  --chart-2: #2dd4bf;
+  --chart-3: #ff7a6b;
+  --chart-4: #f5b84a;
+  --chart-5: #60a5fa;
+  --radius: 0.5rem;
+
+  --sidebar: #0b0e17;
+  --sidebar-foreground: #e8ebf4;
+  --sidebar-primary: #9d8cff;
+  --sidebar-primary-foreground: #0f0b26;
+  --sidebar-accent: #211e42;
+  --sidebar-accent-foreground: #cfc8ff;
+  --sidebar-border: #262e42;
+  --sidebar-ring: #a99dff;
 }
 
 @layer base {
@@ -213,6 +223,12 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
+    /* two faint aurora glows behind the page; fixed, so they do not scroll with long tables */
+    background-image:
+      radial-gradient(60rem 30rem at 10% -10%, color-mix(in srgb, var(--brand-2) 16%, transparent), transparent 70%),
+      radial-gradient(50rem 26rem at 95% 0%, color-mix(in srgb, var(--brand-1) 10%, transparent), transparent 70%),
+      radial-gradient(40rem 24rem at 60% 110%, color-mix(in srgb, var(--brand-3) 8%, transparent), transparent 70%);
+    background-attachment: fixed;
   }
   ::selection {
     background-color: color-mix(in oklch, var(--primary) 22%, transparent);
@@ -234,6 +250,31 @@
  * one colour. It is the only uppercase text in the app.
  */
 @layer components {
+  /* The brand gradient as a fill, as text, and as a 1px border of a card (used sparingly: the logo, the hero, one CTA). */
+  .brand-fill {
+    background-image: linear-gradient(110deg, var(--brand-1), var(--brand-2) 50%, var(--brand-3));
+  }
+  .brand-text {
+    background-image: linear-gradient(100deg, var(--brand-1), var(--brand-2) 45%, var(--brand-3));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .brand-border {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(var(--card), var(--card)) padding-box,
+      linear-gradient(120deg, color-mix(in srgb, var(--brand-1) 60%, transparent), color-mix(in srgb, var(--brand-2) 70%, transparent), color-mix(in srgb, var(--brand-3) 60%, transparent)) border-box;
+  }
+  /* The primary call to action: violet to magenta, white text >= 4.8:1 at both ends. */
+  .cta-gradient {
+    background-image: linear-gradient(110deg, #5b49e8, #8a3fd0 55%, #c2417e);
+    color: #ffffff;
+    box-shadow: 0 8px 28px -10px rgba(124, 108, 255, 0.55);
+  }
+  .cta-gradient:hover {
+    filter: brightness(1.08);
+  }
   .stamp {
     display: inline-flex;
     align-items: center;
