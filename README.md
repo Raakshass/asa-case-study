@@ -1,4 +1,8 @@
-# Invoice AP Agent
+# Tollgate: invoice AP agent
+
+<img src="src/app/icon.png" alt="Tollgate logo: a dot-matrix T on a teal, violet and coral gradient" width="72" height="72">
+
+**Every invoice checked before it's paid.**
 
 New here? Start with the [Reviewer guide](REVIEWER_GUIDE.md): a one-page map of what it does, where decisions are made and what has not been verified.
 
