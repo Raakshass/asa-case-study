@@ -111,6 +111,12 @@ export function StartView() {
           <p className="max-w-prose text-sm text-muted-foreground">
             Ten generated invoices, one for each situation the rules handle. Press a card to run it and open the live view.
           </p>
+          <p className="max-w-prose rounded-lg bg-muted/60 px-3 py-2 text-sm ring-1 ring-border">
+            <span className="font-semibold">New here?</span> Start with <span className="font-semibold">Happy path</span>, then try the hard cases:{" "}
+            <span className="font-semibold">Split-PO over-billing</span>, <span className="font-semibold">Disguised duplicate</span>,{" "}
+            <span className="font-semibold">Bank details changed</span> and <span className="font-semibold">Prompt injection</span>. Each sample can run once; to
+            run them again, reset the demo data at the bottom of this page.
+          </p>
         </div>
         <SampleSection disabled={busy} startingFile={job?.kind === "sample" ? job.file : null} onPick={handleSample} problem={sampleProblem} />
       </section>

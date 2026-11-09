@@ -18,7 +18,7 @@ export default function DashboardPage() {
     <>
       <PageHeader
         title="Dashboard"
-        description="Every invoice the agent has processed, newest first. The page refreshes by itself every few seconds."
+        description="Every invoice Tollgate has checked, newest first, with its decision and why. It refreshes by itself."
         actions={
           <Button asChild size="lg">
             <Link href="/runs/new">

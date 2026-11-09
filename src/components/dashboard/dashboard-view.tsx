@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { ArrowRight, TriangleAlert } from "lucide-react";
+import { ArrowRight, Info, TriangleAlert } from "lucide-react";
 import { getRuns, unwrap } from "@/components/shared/api";
 import { EmptyState } from "@/components/shared/empty-state";
 import { ErrorState } from "@/components/shared/error-state";
@@ -13,6 +13,7 @@ import type { DashboardKpis } from "@/lib/types";
 import { FilterChips } from "./filter-chips";
 import { LedgerBar } from "./ledger-bar";
 import { RunsTable } from "./runs-table";
+import { WelcomePanel } from "./welcome-panel";
 import { filterCount, filterNoun, type DashboardFilter } from "./run-format";
 
 /** The dashboard refreshes this often (docs/CONTRACTS.md section 7). */
@@ -95,8 +96,10 @@ export function DashboardView() {
       ? ""
       : `Showing ${shown} ${shown === 1 ? "run" : "runs"}${filter === "all" ? "" : `, filter ${filterNoun(filter)}`}.`;
 
+  const historyRows = data ? data.runs.filter((r) => r.is_history).length : 0;
   return (
     <div className="space-y-6">
+      <WelcomePanel />
       <LedgerBar kpis={kpis} loading={kpis === null && loading} />
       <div className="space-y-3">
         <FilterChips value={filter} onChange={setFilter} kpis={kpis} />
@@ -110,6 +113,16 @@ export function DashboardView() {
             <span>
               <strong className="font-semibold">Live updates paused.</strong> {error.message} Retrying automatically; the rows below
               may be out of date.
+            </span>
+          </p>
+        ) : null}
+        {historyRows > 0 ? (
+          <p data-history-note className="flex items-start gap-2 rounded-lg bg-muted/60 px-3 py-2.5 text-sm text-muted-foreground ring-1 ring-border">
+            <Info aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-primary" />
+            <span>
+              <strong className="font-semibold text-foreground">What are the &ldquo;Pre-loaded history&rdquo; rows?</strong> {historyRows === 1 ? "One example invoice" : `${historyRows} example invoices`}{" "}
+              that were processed before today. They give the checks something real to compare against: purchase-order money already
+              spent, and an earlier invoice for the duplicate check to find. Your own runs appear above them.
             </span>
           </p>
         ) : null}

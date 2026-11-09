@@ -15,7 +15,7 @@ export default function NewRunPage() {
     <>
       <PageHeader
         title="Start a run"
-        description="Upload an invoice PDF or run one of the ready-made samples. The agent reads it, the rules decide, and every step is shown."
+        description="Upload a vendor invoice PDF, or run one of the ready-made samples. You will watch all 10 checks run, then get the decision and the reasons."
       />
       <StartView />
     </>

@@ -9,6 +9,7 @@ import { INK_TONE } from "@/components/shared/tones";
 import { Button } from "@/components/ui/button";
 import { DECISIONS, STAGES, type Decision, type RunDetail, type StageKey, type StepView } from "@/lib/types";
 import { EvidenceBoundary, EvidencePanel } from "./evidence-panels";
+import { STAGE_PLAIN } from "./stage-plain";
 import { STATUS_TONE, displayText, formatDuration, stepDurationMs, stepImpact } from "./run-format";
 
 /** The row of a stage the pipeline has not written yet (a queued run, or one whose rows are still being created). */
@@ -78,6 +79,8 @@ function StepRow({ step, run, open, onToggle, panelId, buttonId }: StepRowProps)
               <span className="text-base font-semibold">{step.label}</span>
               {decision ? <DecisionBadge decision={decision} size="sm" /> : null}
             </span>
+            {/* the check in plain words, for people who do not read "normalize" (from 768 px; the How it works page has them all) */}
+            <span className="hidden text-sm text-muted-foreground md:inline">{STAGE_PLAIN[step.key].question}</span>
             {decision ? null : (
               <span aria-hidden="true" className={cn("text-sm font-medium", INK_TONE[tone])}>
                 {STEP_STATUS_LABEL[step.status]}

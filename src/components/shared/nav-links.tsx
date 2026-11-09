@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Database, LayoutDashboard, Upload, Workflow, type LucideIcon } from "lucide-react";
+import { BookOpen, Database, LayoutDashboard, Upload, Workflow, type LucideIcon } from "lucide-react";
 import { cn } from "cn";
 
 interface NavItem {
@@ -15,7 +15,7 @@ interface NavItem {
 
 const isNewRun = (pathname: string) => pathname === "/runs/new" || pathname.startsWith("/runs/new/");
 
-/** The four top-level pages. A run page (/runs/<id>) counts as part of the dashboard it is opened from. */
+/** The five top-level pages. A run page (/runs/<id>) counts as part of the dashboard it is opened from. */
 const NAV_ITEMS: readonly NavItem[] = [
   {
     href: "/",
@@ -26,10 +26,11 @@ const NAV_ITEMS: readonly NavItem[] = [
   { href: "/runs/new", label: "New run", Icon: Upload, isActive: isNewRun },
   { href: "/data", label: "Procurement data", Icon: Database, isActive: (p) => p === "/data" || p.startsWith("/data/") },
   { href: "/automations", label: "Automations", Icon: Workflow, isActive: (p) => p === "/automations" || p.startsWith("/automations/") },
+  { href: "/how-it-works", label: "How it works", Icon: BookOpen, isActive: (p) => p === "/how-it-works" },
 ];
 
 /**
- * Main navigation: Dashboard, New run, Procurement data, Automations. The current page gets aria-current="page", a tinted
+ * Main navigation: Dashboard, New run, Procurement data, Automations, How it works. The current page gets aria-current="page", a tinted
  * background and bolder text (not colour alone). Wraps onto a second line on narrow screens instead of
  * scrolling sideways. Client component because it reads the pathname.
  */
