@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { PRODUCT_NAME, PRODUCT_TAGLINE } from "@/components/brand/brand";
 import { AppHeader } from "@/components/shared/app-header";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -8,11 +9,11 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 
 export const metadata: Metadata = {
   title: {
-    default: "Invoice AP Agent",
-    template: "%s | Invoice AP Agent",
+    default: `${PRODUCT_NAME}: ${PRODUCT_TAGLINE}`,
+    template: `%s | ${PRODUCT_NAME}`,
   },
   description:
-    "Screens, extracts and checks vendor invoices against purchase orders: the model reads, the rules decide.",
+    "Screens, reads and checks vendor invoices against purchase orders, vendors and past invoices, then decides Approve, Hold or Reject with every reason: the model reads, the rules decide.",
 };
 
 export default function RootLayout({

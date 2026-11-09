@@ -433,7 +433,7 @@ async function callOnce(model: string, payload: string, spec: CallSpec): Promise
         headers: {
           Authorization: `Bearer ${spec.key}`,
           "Content-Type": "application/json",
-          "X-OpenRouter-Title": "Invoice AP Agent",
+          "X-OpenRouter-Title": "Tollgate (Invoice AP Agent)",
         },
         body: payload,
         signal: spec.outer ? AbortSignal.any([ctrl.signal, spec.outer]) : ctrl.signal,
