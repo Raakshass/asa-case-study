@@ -197,6 +197,7 @@ function AttemptsTable({ attempts }: { attempts: unknown[] }) {
           {rows.map((a, i) => {
             const model = displayText(a.model, 80) || "unknown";
             const served = displayText(a.servedBy, 80);
+            const route = displayText(a.route, 40);
             const failure = asString(a.failure);
             const ok = asBool(a.ok) === true;
             const message = displayText(a.message, 200);
@@ -207,6 +208,7 @@ function AttemptsTable({ attempts }: { attempts: unknown[] }) {
                 <TableCell className={CELL}>
                   {model}
                   {served && served !== model ? <span className="block text-xs text-muted-foreground">{`served by ${served}`}</span> : null}
+                  {route ? <span className="block text-xs text-muted-foreground">{`via ${route}`}</span> : null}
                 </TableCell>
                 <TableCell className={CELL}>
                   {ok ? (

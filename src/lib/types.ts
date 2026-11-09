@@ -562,6 +562,8 @@ export interface ExtractAttempt {
   reasoningTokens: number | null;
   /** short failure message; never document content */
   message: string | null;
+  /** which provider and key made the call: "OpenRouter", "OpenRouter key 2", "NVIDIA" (never the key). Absent for the mock. */
+  route?: string;
 }
 
 export interface ExtractOptions {

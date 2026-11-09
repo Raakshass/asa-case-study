@@ -9,11 +9,12 @@
  *      with "use client" and everything it imports under src/, transitively, is client code; such files may import
  *      from src/lib only types.ts and format.ts, the src/lib files those pull in may not import Node built-ins or
  *      server-only packages, and no client file may import them either.
- *   3. The production client bundle (.next/static) contains no "OPENROUTER", no "better-sqlite3" and none of the
+ *   3. The production client bundle (.next/static) contains no "OPENROUTER", no "NVIDIA_API_KEY", no "better-sqlite3" and none of the
  *      file-system / database code of src/lib (markers below). A positive control checks the same markers DO occur
  *      in the server build, so a marker that never matches anything cannot make this pass by accident.
- *   4. No source file outside src/lib/extract.ts reads OPENROUTER_API_KEY (src/ and scripts/; writing or deleting
- *      it, as scripts/test-extract.ts does, is not a read).
+ *   4. No source file outside src/lib/extract.ts reads a provider key: OPENROUTER_API_KEY, its numbered extras
+ *      (OPENROUTER_API_KEY2.., _2..) or NVIDIA_API_KEY (src/ and scripts/; writing or deleting them, as
+ *      scripts/test-extract.ts does, is not a read).
  *   4b. Automations never write the decision tables (Automations plan D3): no statement in the automations code
  *      inserts, updates or deletes runs, run_steps, invoices, purchase_orders, vendors or run_reviews, and it imports
  *      neither the review module, insertInvoice, seedDatabase/seedFromData nor (other than as a type) the pipeline.
@@ -138,6 +139,7 @@ function clientBoundary(): void {
 /** Strings that only server code of this repo (or a server-only package) contains. */
 const MARKERS: [string, RegExp][] = [
   ["OPENROUTER", /OPENROUTER/i],
+  ["NVIDIA_API_KEY", /NVIDIA_API_KEY/],
   ["better-sqlite3", /better-sqlite3/],
   ["SQLite schema (db.ts)", /CREATE TABLE IF NOT EXISTS/],
   ["SQLite pragmas (db.ts)", /journal_mode|busy_timeout/],
@@ -166,13 +168,13 @@ function bundle(): void {
   report(serverFiles.length > 0 && missing.length === 0, `control: the server build does contain the server markers (${control.length} checked in ${serverFiles.length} files)`, missing.join(", "));
 }
 
-/* ---- 4. who reads OPENROUTER_API_KEY ------------------------------------------------------------- */
+/* ---- 4. who reads the provider keys --------------------------------------------------------------- */
 
 function keyReads(): void {
   const files = [...walk(SRC, (f) => CODE_RE.test(f)), ...walk(path.join(ROOT, "scripts"), (f) => CODE_RE.test(f))];
   const reads: string[] = [];
   let inExtract = 0;
-  const access = /process\.env(?:\.OPENROUTER_API_KEY\b|\[\s*["'`]OPENROUTER_API_KEY["'`]\s*\])/g;
+  const access = /process\.env(?:\.(?:OPENROUTER_API_KEY\w*|NVIDIA_API_KEY)\b|\[\s*["'`](?:OPENROUTER_API_KEY\w*|NVIDIA_API_KEY)["'`]\s*\])/g;
   for (const file of files) {
     if (path.resolve(file) === path.resolve(__filename)) continue;
     const text = fs.readFileSync(file, "utf8");
@@ -184,10 +186,10 @@ function keyReads(): void {
       if (rel(file) === "src/lib/extract.ts") inExtract++;
       else reads.push(`${rel(file)}: ${text.slice(m.index, (m.index ?? 0) + 60).split("\n")[0]}`);
     }
-    if (/\{[^}]*\bOPENROUTER_API_KEY\b[^}]*\}\s*=\s*process\.env/.test(text) && rel(file) !== "src/lib/extract.ts") reads.push(`${rel(file)}: destructures it from process.env`);
+    if (/\{[^}]*\b(?:OPENROUTER_API_KEY\w*|NVIDIA_API_KEY)\b[^}]*\}\s*=\s*process\.env/.test(text) && rel(file) !== "src/lib/extract.ts") reads.push(`${rel(file)}: destructures one from process.env`);
   }
-  report(reads.length === 0, `no file outside src/lib/extract.ts reads OPENROUTER_API_KEY (${files.length} files under src/ and scripts/)`, reads.join("\n        "));
-  report(inExtract >= 1, `control: src/lib/extract.ts does read it (${inExtract} read)`);
+  report(reads.length === 0, `no file outside src/lib/extract.ts reads a provider key (OPENROUTER_API_KEY*, NVIDIA_API_KEY; ${files.length} files under src/ and scripts/)`, reads.join("\n        "));
+  report(inExtract >= 1, `control: src/lib/extract.ts does read them (${inExtract} direct read)`);
 }
 
 /* ---- 4b. automations never write the decision tables (D3) ---------------------------------------- */
