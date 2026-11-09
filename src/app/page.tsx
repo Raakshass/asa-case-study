@@ -1,12 +1,14 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Upload } from "lucide-react";
+import { PRODUCT_NAME } from "@/components/brand/brand";
 import { DashboardView } from "@/components/dashboard/dashboard-view";
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
 
+// Absolute: the layout's "%s | Tollgate" template does not reach a page in its own segment.
 export const metadata: Metadata = {
-  title: "Dashboard",
+  title: { absolute: `Dashboard | ${PRODUCT_NAME}` },
 };
 
 /**
