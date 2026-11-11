@@ -10,7 +10,7 @@ An accounts-payable agent that takes a vendor invoice PDF and returns **Approve,
 
 > **Design principle: the model reads, the rules decide, every decision has a reason, and the invoice is never trusted.**
 
-**Live demo:** https://asa-case-study.onrender.com (Render's free tier: it sleeps after 15 minutes without traffic and the first request after that takes about a minute; **to keep it awake, set the service's Health Check Path to `/api/health` in the Render dashboard and, if it still sleeps, have a pinger such as UptimeRobot or cron-job.org request `https://asa-case-study.onrender.com/api/health` every 5 minutes (`GET` or `HEAD`; not verified whether Render's own health check counts as traffic); an awake instance also keeps the Automations schedule ticking; its storage is wiped on every restart, so reset the demo data first; it uses the free model, which allows 50 requests a day, see [Free route](#free-route-no-credit)).
+**Live demo:** https://asa-case-study.onrender.com (Render's free tier, which sleeps after 15 minutes without traffic. The [keep-alive workflow](.github/workflows/keep-alive.yml) pings [`/api/health`](src/app/api/health/route.ts) every 5 minutes from GitHub Actions so it stays awake; if it ever does sleep, the first request takes about a minute. See [Deploy on Render](#deploy-on-render-the-live-demo).)
 
 > [!IMPORTANT]
 > **What has and has not been verified (2026-11-03).** The tests, the smoke run and the browser run use the offline mock extractor (`EXTRACT_MOCK=1`) or, for the extraction code's own tests, a local fake OpenRouter. **A real model has been run once, on the free route** (`nvidia/nemotron-3.5-super-vl:free`, a key with no credit; see [Free route](#free-route-no-credit)): all 10 samples through `npm run eval` (9 of 10 right on the key fields; the plan's gate passes) and through the real server (8 of 10 ended as expected on the first pass; the other two are explained there). **The paid defaults (`google/gemini-3.8-flash`, `anthropic/claude-haiku-5.5`) have not been called**, so their accuracy, latency and cost are unverified, and `docs/eval-extract.md`, the three-model comparison table the plan asks for, does not exist until someone runs `npm run eval -- --out` with credit. The owner deployed the repo to Render's free tier (the live demo above; health-checked only: `/api/master` answered 200 and `/api/samples` listed the 10 samples). Whether Render built the Dockerfile was not checked, and the Dockerfile has not been built by the person who wrote it (no Docker daemon): its steps were replayed by hand outside Docker on the final code, under Node 22.23.4 and Node 20.20.2. Railway has not been tried (see [Deploy on Railway](#deploy-on-railway)). **Update 2026-11-10:** `npm run eval -- --out` ran on the four routes that the keys of that day allow ([docs/eval-extract.md](docs/eval-extract.md)): the free Nemotron slug on OpenRouter got 10 of 10 right (the scan too, through mistral-ocr for $0.002), NVIDIA direct 8 of 10 (it skips the scan by design and misread the statement's date), and both paid defaults 0 of 10: OpenRouter refused every request on all three accounts with "This request requires at least $0.50 in balance for files", so they are still untested. Sample 1 also ran end to end through the NVIDIA route on a local production server (approved, 2.9 s).
@@ -32,6 +32,7 @@ An accounts-payable agent that takes a vendor invoice PDF and returns **Approve,
 - [Quick start](#quick-start)
 - [Environment variables](#environment-variables)
 - [Checks](#checks)
+- [Deploy on Render (the live demo)](#deploy-on-render-the-live-demo)
 - [Deploy on Railway](#deploy-on-railway)
 - [Security model and known limits](#security-model-and-known-limits)
 - [What's next](#whats-next)
@@ -165,7 +166,7 @@ A key with no purchased credit can call `:free` models only. The app has a profi
 
 ## Checks
 
-None of them calls a model or needs a key. Counts as of 2026-11-05 on the final code (after the test-report fix round), all passing with 0 failures and 0 skips (`e2e` with `E2E_DATA_DIR` set).
+None of them calls a model or needs a key. Counts as of 2026-11-10 on the final code (after the key-failover round), all passing with 0 failures and 0 skips (`e2e` with `E2E_DATA_DIR` set).
 
 | Command | Tests | What it proves |
 |---|---|---|
@@ -192,7 +193,16 @@ kill "$SERVER"; rm -rf "$T"            # stop the server, remove its data
 
 `smoke` waits up to 180 s for the server to answer (`SMOKE_WAIT_SECONDS`); it takes about a minute, `e2e` about two and a half.
 
-Where they ran for this README: the counts above were measured on 2026-11-05 on Node 20.20.2 only (`check`, `test:extract`, `test:api`, `rehearse` and `check:static` in the repo, `check:static` against a production build; `smoke` and `e2e` under `next start` from the repo, with the variables above). The earlier Node 22 and layout replays below were done on 2026-11-03, before the review, redesign and Automations rounds, and were not repeated: they were with the counts of that day. In the production-layout replay described under [Deploy on Railway](#deploy-on-railway), `smoke` on Node 22.23.4 and on Node 20.20.2, `e2e` on Node 22.23.4 (and on Node 20.20.2, where one timing failure in its first run passed on the re-run) and `check:static` on a build made with Node 22.23.4. The recipe above was not replayed word for word on a fresh machine: those runs set the same variables through their own launch scripts, and Playwright's Chromium was already installed. Do not point `smoke` or `e2e` at a deployment that uses a real key: they expect the mock's results and would spend credit.
+Where they ran for this README: the counts above were measured on 2026-11-10 on Node 20.20.2 only (`check`, `test:extract`, `test:api`, `rehearse` and `check:static` in the repo, `check:static` against a production build; `smoke` and `e2e` under `next start` from the repo, with the variables above). The earlier Node 22 and layout replays below were done on 2026-11-03, before the review, redesign and Automations rounds, and were not repeated: they were with the counts of that day. In the production-layout replay described under [Deploy on Railway](#deploy-on-railway), `smoke` on Node 22.23.4 and on Node 20.20.2, `e2e` on Node 22.23.4 (and on Node 20.20.2, where one timing failure in its first run passed on the re-run) and `check:static` on a build made with Node 22.23.4. The recipe above was not replayed word for word on a fresh machine: those runs set the same variables through their own launch scripts, and Playwright's Chromium was already installed. Do not point `smoke` or `e2e` at a deployment that uses a real key: they expect the mock's results and would spend credit.
+
+## Deploy on Render (the live demo)
+
+The live demo runs on Render's free tier from this repo's `main` branch; every push redeploys it. What it needs:
+
+- **Environment**: `OPENROUTER_API_KEY` (plus `OPENROUTER_API_KEY2`, `OPENROUTER_API_KEY3` and `NVIDIA_API_KEY` for the fallback routes), `EXTRACT_MODEL=nvidia/nemotron-3.5-super-vl:free`, an empty `FALLBACK_MODEL`, `DEMO_RESET_ENABLED=true` and a `DEMO_RESET_TOKEN` of at least 16 characters. Never `EXTRACT_MOCK`.
+- **Health Check Path**: `/api/health` (Settings → Health Check Path). Render then waits for it before it switches traffic to a new deploy. It does not keep a free instance awake: Render's own checks are not traffic.
+- **Staying awake**: [`.github/workflows/keep-alive.yml`](.github/workflows/keep-alive.yml) requests `/api/health` every 5 minutes from GitHub Actions (free for a public repo). One service awake all month is about 730 instance hours, inside the 750 free hours. GitHub can delay scheduled runs, so each run pings twice, 150 s apart; for minute-exact pings add an external monitor such as UptimeRobot or cron-job.org on the same URL.
+- **Storage is wiped on every restart or deploy** (the free tier has no disk). The vendors, purchase orders and pre-loaded history are seeded again on boot; the runs made since are gone. Do not push just before a demo, and reset the demo data after rehearsing.
 
 ## Deploy on Railway
 
@@ -245,9 +255,8 @@ Railway facts this relies on (from its documentation, 2026-11-03): it injects `P
 ## What's next
 
 1. Put at least $0.50 of credit on one OpenRouter account (OpenRouter refuses PDF requests to paid models below that) and rerun `npm run eval -- --out` for Gemini 3.8 Flash and Haiku 5.5. Until then the free Nemotron slug (10 of 10 on 2026-11-10) stays `EXTRACT_MODEL`, with the extra keys and NVIDIA behind it; if a paid model wins, set it as `EXTRACT_MODEL` and Nemotron as `FALLBACK_MODEL` (no code change).
-2. A human decision on HOLD runs ("approve anyway" or "reject" with a required comment, saved as a new audit row).
-3. Email inbox ingestion, ERP sync, approval routing by amount, per-vendor layout learning, multi-currency.
-4. For production: accounts and roles, a durable job queue with per-PO locks instead of one serial queue, Postgres instead of SQLite, a nonce-based CSP, and an LLM tier with no-training terms.
+2. Email inbox ingestion, ERP sync, approval routing by amount, per-vendor layout learning, multi-currency.
+3. For production: accounts and roles (today a resolved hold records what the reviewer wrote, not who), a durable job queue with per-PO locks instead of one serial queue, Postgres instead of SQLite, a nonce-based CSP, and an LLM tier with no-training terms.
 
 ## Repository map
 
@@ -261,7 +270,8 @@ src/components/   UI (run view, dashboard, start page, data page)
 data/seed/        vendors, purchase orders, pre-loaded history
 data/samples/     the 10 sample PDFs and truth/NN.json
 scripts/          checks, smoke and e2e tests, sample generator, eval
-docs/             CONTRACTS.md (signatures, HTTP API), DEMO.md (demo script), notes-*.md (API research), img/
+docs/             CONTRACTS.md (signatures, HTTP API), DEMO.md (demo script), eval-extract.md (model comparison), notes-*.md (API research), img/
+.github/          keep-alive.yml: pings the live demo every 5 minutes so Render's free tier does not sleep
 ```
 
 More: [docs/DEMO.md](docs/DEMO.md) (the 5-minute demo and likely questions), [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) (the spec), [docs/CONTRACTS.md](docs/CONTRACTS.md) (module signatures and the HTTP API), [ASSUMPTIONS.md](ASSUMPTIONS.md) (assumptions, deviations, known limits).

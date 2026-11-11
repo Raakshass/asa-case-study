@@ -1,8 +1,10 @@
 # Reviewer guide
 
+**Live:** https://asa-case-study.onrender.com · **Problem:** PS-1, invoice processing from PDF to decision.
+
 ## What it does
 
-The Invoice AP Agent takes a vendor invoice PDF and returns **Approve, Hold or Reject**, with the ten stages it went through, a reason for each and the next action, on one screen. A language model only reads the document; plain TypeScript rules decide, and nothing that comes from the invoice is trusted. A person can then resolve a hold, and optional automations route what was decided to people and tools.
+Tollgate takes a vendor invoice PDF and returns **Approve, Hold or Reject**, with the ten stages it went through, a reason for each and the next action, on one screen. A language model only reads the document; plain TypeScript rules decide, and nothing that comes from the invoice is trusted. A person can then resolve a hold, and optional automations route what was decided to people and tools.
 
 ## The 5-minute path
 
@@ -33,7 +35,7 @@ It transcribes the document into a strict JSON schema (stage 3) and, when no PO 
 
 ## What is not verified
 
-- **A live evaluation with a paid model key.** The suites run on the mock and on a fake OpenRouter; the free route was exercised by hand and 8 of 10 samples matched the mock on the first pass (see the README's "Free route"). The plan's B1 (a scored run with a credit-limited key) has not been done.
+- **The paid models.** A scored run with real keys was done on 2026-11-10 ([docs/eval-extract.md](docs/eval-extract.md)): the free Nemotron model, which the live demo uses, got all 10 samples right, scan included, in 3.3 s on average; NVIDIA's own API, the last fallback, 8 of 10. Gemini 3.8 Flash and Claude Haiku 5.5 could not be scored: OpenRouter refuses PDF requests to paid models on an account with less than $0.50 of credit. The test suites themselves run on the mock and on a fake OpenRouter.
 - **The PDF frame in a real Chrome window under the Content-Security-Policy.** The browser tests use Chromium through Playwright; a person should open a run page once in Chrome.
 - **Screen readers.** Roles, labels, focus and keyboard paths are tested in a browser, but no screen reader was used.
 - **A real webhook.** Sending is tested with injected fakes; no request has gone to a real host (the plan's one optional manual send).
