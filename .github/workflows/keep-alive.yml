@@ -1,0 +1,40 @@
+# Keeps the live demo on Render's free tier awake. A free instance sleeps after 15 minutes without inbound traffic, and
+# the first request after that waits about a minute while it boots (Render's own health check does not count as
+# traffic). This pings GET /api/health, the cheap endpoint made for it (one SELECT 1, no table read, not rate limited).
+#
+# Every 5 minutes (GitHub's shortest schedule), off the top of the hour, where GitHub delays scheduled runs the most.
+# Each run pings twice, 150 s apart, so a late run still leaves no 15-minute gap. A failed ping is logged and retried,
+# never fatal: a sleeping or redeploying instance answers slowly, and the next run pings again. Free for a public repo.
+# One service awake all month is about 730 instance hours, inside Render's 750 free hours a month.
+name: Keep the live demo awake
+
+on:
+  schedule:
+    - cron: "2-59/5 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/keep-alive.yml"]
+
+permissions: {}
+
+concurrency:
+  group: keep-alive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      URL: https://asa-case-study.onrender.com/api/health
+    steps:
+      - name: Ping /api/health twice, 150 s apart
+        run: |
+          ping() {
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 100 --retry 2 --retry-delay 15 "$URL" || true)
+            echo "$(date -u +%H:%M:%SZ) GET $URL -> ${code:-no answer}"
+          }
+          ping
+          sleep 150
+          ping
