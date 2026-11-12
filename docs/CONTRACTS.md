@@ -651,6 +651,7 @@ export interface DashboardKpis {
 export interface RunsListResponse {
     runs: RunListItem[];
     kpis: DashboardKpis;
+    history_kpis: DashboardKpis; // added 2026-11-12: the same figures over the pre-loaded history alone
 }
 export interface SampleListItem {
     file: string;
@@ -1113,7 +1114,7 @@ Every handler: `export const runtime = "nodejs"; export const dynamic = "force-d
 | Method + route | Input | Success | Errors |
 |---|---|---|---|
 | `POST /api/runs` | multipart `file` (any type; ingest decides) **or** JSON `{ sample }` with `sample` in `SAMPLE_FILES` (`SampleFileSchema`) | `202 CreateRunResponse` `{ runId }`, immediately | `400` bad body / unknown sample; `404` the sample's PDF is missing on the server; `408` the body did not arrive whole within `CONFIG.bodyReceiveTimeoutMs` (60 s in all, not idle time; JSON or upload; no run created, temp file removed; fix round 2); `413` file > `CONFIG.maxFileBytes` (no run created); `429` with `Retry-After` header + `retryAfterSec`, from `checkRateLimit` (10 per address per minute, or the hourly cap, at the door), from `takeGlobalSlot` (the hour filled up while the body arrived) or from `beginUpload` (uploads in progress: `CONFIG.maxUploadsInFlightPerIp` per address, `CONFIG.maxUploadsInFlight` in all; `Retry-After: 5`; counted nowhere, body never read) |
-| `GET /api/runs?decision=&limit=` | `decision` in `APPROVE \| HOLD \| REJECT \| security` (optional), `limit` 1..200 (default 50) | `200 RunsListResponse` `{ runs: RunListItem[], kpis: DashboardKpis }`, newest first; kpis over all runs | `400` |
+| `GET /api/runs?decision=&limit=` | `decision` in `APPROVE \| HOLD \| REJECT \| security` (optional), `limit` 1..200 (default 50) | `200 RunsListResponse` `{ runs: RunListItem[], kpis: DashboardKpis, history_kpis: DashboardKpis }`, newest first; kpis over all runs, history_kpis over the pre-loaded history alone | `400` |
 | `GET /api/runs/:id` | `id` must pass `z.uuid()` | `200 RunDetail` (steps ordered by idx; `is_history` runs have none) | `400`, `404` |
 | `GET /api/files/:hash` (and `HEAD`: same headers, no body) | `hash` must match `SHA256_HEX_RE` | `200` PDF bytes; `Content-Type: application/pdf`, `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600, immutable` | `400`, `404` |
 | `GET /api/samples` | - | `200 SampleListItem[]` (from `listSamples()`) | - |

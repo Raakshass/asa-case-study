@@ -23,7 +23,7 @@ The recruiter's rules: Loom or any screen recording, **no AI voice**, up to 5 mi
 | Time | Screen | Say (in your own words) |
 |---|---|---|
 | 0:00 to 0:25 | **Dashboard**: the welcome panel | "AP teams open hundreds of PDF invoices a month, find the PO, check the numbers and decide. Tollgate does that: it reads the invoice, checks it against the POs, the vendor list and past invoices, and decides Approve, Hold or Reject, with every reason on screen. The AI only reads; plain rules decide." |
-| 0:25 to 0:45 | The **Pre-loaded history** note, then **Procurement data**, PO-1003 | "Four invoices were processed before today; they use up PO money and are what duplicates are checked against. PO-1003 has six thousand dollars left." |
+| 0:25 to 0:45 | Open **Pre-loaded history** under the empty table, then **Procurement data**, PO-1003 | "These four example invoices were processed before today; they use up PO money and are what duplicates are checked against. PO-1003 has six thousand dollars left." |
 | 0:45 to 1:55 | **New run** → **Happy path** → **Run this sample**; the map of the 10 checks lights up | Narrate the checks as they light up: real PDF, never seen; screened for hidden instructions before any AI sees it; the AI reads it into fixed fields; arithmetic and "does each value appear on the page"; vendor, PO, amounts and duplicates are plain code. Result **Approve**; point at the confidence chips and the **Grounded** ticks, and at **Took** and **Cost** ($0.00 on the free model). |
 | 1:55 to 2:45 | **Run another invoice** → **Split-PO over-billing** | Result **Hold**. Open **8 Amounts vs PO**: "Each invoice alone looks fine; together they bill $3,000 more than the PO. Next action: ask for a PO amendment or a credit." |
 | 2:45 to 3:35 | **Prompt injection** | The PDF looks normal. Result **On hold** with **Security flag** and the banner quoting the hidden white text: "It tells the AI to approve and change the PO and the total. Even a fooled model cannot approve anything: rules decide, and every value must appear on the page." |
@@ -39,7 +39,7 @@ Plan section 12, with the real clicks. Use this in the live interview, where the
 
 **1. Reset, dashboard (10 s)**
 - To show the reset on camera: **New run** → **Demo tools** → **Reset demo data** → **Confirm reset** (the token is pre-filled in the same tab after the pre-flight reset), then **Dashboard**.
-- Screen: the Tollgate welcome (the dot wordmark assembles; three steps; **Try a sample invoice**), then four rows with **Pre-loaded history** under the vendor and the note **What are the "Pre-loaded history" rows?**; **4 processed**, **Approved 4**, **$30,030.00 approved**. Optional: **How it works** in the header lists the 10 checks as plain questions, handy if a viewer is not from finance.
+- Screen: the Tollgate welcome (the dot wordmark assembles; three steps; **Try a sample invoice**), then **0 processed** and **No invoices checked yet**, with the folded **Pre-loaded history · 4 example invoices from before today** under it: open it to show the four rows. Optional: **How it works** in the header lists the 10 checks as plain questions, handy if a viewer is not from finance.
 - Say: "Four invoices were processed before today. They matter: they use up PO balances and they are what duplicates are checked against."
 
 **2. Procurement data (15 s)**
@@ -80,7 +80,7 @@ Plan section 12, with the real clicks. Use this in the live interview, where the
 - Say: "White one-pixel text tells the AI to approve and to change the PO and the total. Even if the model had been fooled, it can't approve anything: rules decide, and values must match the document."
 
 **9. Dashboard (15 s)**
-- **Dashboard**: **Total processed** 10, **Approved** 5, **On hold** 4, **Rejected** 1, **Security flags** 1, **Value approved** $42,680.00 (with the mock). Press the **Security** chip: only #9.
+- **Dashboard**: the figures count only the runs made here (the pre-loaded history is left out): after the six samples above, **6 processed**, **$12,650.00 approved**, **Approved** 1, **On hold** 4, **Rejected** 1, **Security** 1 (before any hold is resolved). Press the **Security** chip: only #9.
 - Close: "The model reads, the rules decide, every decision has a reason, and the invoice is never trusted."
 
 That is about 4.5 minutes plus the model's time. If the model is slow, keep steps 5 and 7 to one sentence each.

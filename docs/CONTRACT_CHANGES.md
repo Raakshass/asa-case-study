@@ -355,3 +355,10 @@ Entry format:
 - Why: the owner asked that a used-up or expired key hand over to the next one automatically, and for the most robust setup the available keys allow (2026-11-10: three OpenRouter accounts and an NVIDIA key).
 - Affects: nobody outside extract.ts (the pipeline calls it as before).
 
+## 2026-11-12 dashboard without the pre-loaded history - src/app/api/_lib/views.ts, src/lib/types.ts, src/components/dashboard/{dashboard-view,runs-table,ledger-bar}.tsx
+- Before: the dashboard's figures, filter counts and table mixed the four pre-loaded history runs with the runs made here, so a fresh visit showed "4 processed, $30,030.00 approved" and four rows that looked like someone else's work.
+- After: `GET /api/runs` also returns `history_kpis` (the same figures over the history runs alone; `kpis` is unchanged, still over every run). The dashboard shows `kpis - history_kpis`, lists only the runs made here (or "No invoices checked yet" with a link to the samples), and folds the history into a closed **Pre-loaded history** section under the table (a native details element with its own table, labelled "Pre-loaded history"). `RunsTable` takes an optional `label`.
+- Tests: `scripts/test-api.ts` (the strict list schema has `history_kpis`; it equals `kpis` after a reset and stays the history's figures after runs, filters and limits), `scripts/smoke-http.ts` (the history figures after the ten samples), `scripts/e2e-browser.ts` (after a reset: no table, 0 processed, the history closed; the tiles and chips count the runs made here; the history row link is opened through the section; the 375 px check reads the runs table). No check was added or removed.
+- Why: the owner found that a first visit "shows the previous runs, which does not look good". The history cannot be deleted: edge case A needs its PO spending and edge case B its earlier invoice.
+- Affects: nobody (the field is additive; the old `kpis` keep their meaning).
+
