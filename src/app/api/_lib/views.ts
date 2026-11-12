@@ -119,7 +119,8 @@ const asText = (v: unknown): string | null => (typeof v === "string" ? v : null)
 const asNumber = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 /**
- * GET /api/runs: newest first, at most `limit` rows, optionally filtered; kpis over ALL runs. Vendor, invoice
+ * GET /api/runs: newest first, at most `limit` rows, optionally filtered; kpis over ALL runs, history_kpis over the
+ * pre-loaded history runs alone (the dashboard shows the difference: the runs made here). Vendor, invoice
  * number, total and currency come from the invoices row (id = run id), else from the stored extraction (a run
  * that is still working has only the latter, and a vendor that is not in the master has no name in the former).
  */
@@ -164,6 +165,11 @@ export function listRuns(db: DB, opts: { filter: RunFilter | null; limit: number
     };
   });
 
+  return { runs, kpis: kpisOf(db, false), history_kpis: kpisOf(db, true) };
+}
+
+/** The figures over every run (the filter and the limit do not change them), or over the pre-loaded history runs only. */
+function kpisOf(db: DB, historyOnly: boolean): DashboardKpis {
   const k = db
     .prepare(
       `SELECT COUNT(*) AS total,
@@ -174,19 +180,17 @@ export function listRuns(db: DB, opts: { filter: RunFilter | null; limit: number
               COALESCE(SUM(CASE WHEN COALESCE(rv.action, r.decision) = 'APPROVE' THEN COALESCE(i.total, 0) END), 0) AS approved_value
          FROM runs r
          LEFT JOIN invoices i ON i.id = r.id
-         LEFT JOIN run_reviews rv ON rv.run_id = r.id`,
+         LEFT JOIN run_reviews rv ON rv.run_id = r.id
+        WHERE @historyOnly = 0 OR r.model = @historyModel`,
     )
-    .get() as DashboardKpis;
+    .get({ historyOnly: historyOnly ? 1 : 0, historyModel: HISTORY_MODEL }) as DashboardKpis;
   return {
-    runs,
-    kpis: {
-      total: k.total,
-      approved: k.approved,
-      hold: k.hold,
-      rejected: k.rejected,
-      security_flags: k.security_flags,
-      approved_value: round2(k.approved_value),
-    },
+    total: k.total,
+    approved: k.approved,
+    hold: k.hold,
+    rejected: k.rejected,
+    security_flags: k.security_flags,
+    approved_value: round2(k.approved_value),
   };
 }
 

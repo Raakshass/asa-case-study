@@ -368,7 +368,7 @@ const KpisSchema = z.strictObject({
   security_flags: z.number().int(),
   approved_value: z.number(),
 });
-const RunsListSchema = z.strictObject({ runs: z.array(RunListItemSchema), kpis: KpisSchema });
+const RunsListSchema = z.strictObject({ runs: z.array(RunListItemSchema), kpis: KpisSchema, history_kpis: KpisSchema });
 const SampleListSchema = z.array(
   z.strictObject({ file: SampleFileSchema, title: z.string(), scenario: z.string(), expected: DecisionSchema, edge_case: z.string().nullable() }),
 );
@@ -1600,7 +1600,9 @@ async function routesGroup(t: Check): Promise<void> {
     const history = (await (await runsRoute.GET(get("/api/runs"))).json()) as unknown;
     const h = parsed(t, RunsListSchema, history, "empty-state list");
     const approvedHistory = readSeedFiles().history.reduce((sum, row) => sum + row.total, 0);
-    t.eq(h.kpis, { total: 4, approved: 4, hold: 0, rejected: 0, security_flags: 0, approved_value: Math.round(approvedHistory * 100) / 100 }, "KPIs right after a reset");
+    const historyKpis = { total: 4, approved: 4, hold: 0, rejected: 0, security_flags: 0, approved_value: Math.round(approvedHistory * 100) / 100 };
+    t.eq(h.kpis, historyKpis, "KPIs right after a reset");
+    t.eq(h.history_kpis, historyKpis, "right after a reset every run is history, so history_kpis = kpis (the dashboard shows zero)");
     t.eq(h.runs.every((r) => r.is_history), true, "the 4 history runs are flagged");
     t.ok(h.runs.every((r) => r.vendor_name !== null && r.invoice_number !== null && r.total !== null && r.first_reason !== null), "history rows carry vendor, number, total and reason");
 
@@ -1612,6 +1614,7 @@ async function routesGroup(t: Check): Promise<void> {
     const created = all.runs.map((r) => r.created_at);
     t.ok(created.every((c, i) => i === 0 || c <= created[i - 1]), "created_at never increases down the list");
     t.eq(all.kpis, { total: 8, approved: 5, hold: 2, rejected: 1, security_flags: 1, approved_value: Math.round((approvedHistory + 12650) * 100) / 100 }, "KPIs over all runs");
+    t.eq(all.history_kpis, historyKpis, "history_kpis cover the history alone, whatever runs were made");
     const nine = all.runs.find((r) => r.id === ids[3]);
     t.eq([nine?.decision, nine?.security_flag, nine?.status], ["HOLD", true, "done"]);
     t.includes(nine?.first_reason, "Suspicious");
@@ -1628,8 +1631,10 @@ async function routesGroup(t: Check): Promise<void> {
     t.eq((await only("?decision=REJECT")).runs.length, 1);
     t.eq((await only("?decision=security")).runs.map((r) => r.id), [ids[3]], "security = flagged runs of any decision");
     t.eq((await only("?decision=security")).kpis.total, 8, "KPIs ignore the filter");
+    t.eq((await only("?decision=security")).history_kpis, historyKpis, "history_kpis ignore the filter");
     t.eq((await only("?limit=1")).runs.map((r) => r.id), [ids[3]]);
     t.eq((await only("?limit=1")).kpis.total, 8, "KPIs ignore the limit");
+    t.eq((await only("?limit=1")).history_kpis.total, 4, "history_kpis ignore the limit");
     t.eq((await only("?limit=200")).runs.length, 8);
     t.eq((await only("?decision=&limit=")).runs.length, 8, "empty values count as not given (the plan's ?decision=&limit=50)");
     t.eq((await only("?limit=3&decision=APPROVE")).runs.length, 3);

@@ -386,17 +386,18 @@ async function runSampleViaUi(page: Page, s: TruthSample, expectedStages: string
 const results: Map<number, SampleResult[]> = new Map();
 
 async function sectionReset(page: Page): Promise<void> {
-  await check("reset", "reset through the start page's 'Reset demo data' form; the dashboard then lists only the 4 pre-loaded history rows", async () => {
+  await check("reset", "reset through the start page's 'Reset demo data' form; the dashboard then shows no runs, the 4 pre-loaded history rows folded away", async () => {
     await resetViaUi(page);
     await page.goto(`${BASE}/`);
-    const table = page.getByRole("region", { name: "Recent runs" });
-    await table.waitFor();
-    await page.waitForFunction(() => document.querySelectorAll("tr[data-run-id]").length > 0);
+    await page.getByText("No invoices checked yet", { exact: true }).waitFor();
+    await page.waitForFunction(() => document.querySelectorAll("details[data-history] tr[data-run-id]").length > 0);
     const n = await page.locator("tr[data-run-id]").count();
-    eq(n, 4, "rows after a reset");
-    eq(await page.locator("tr[data-run-id]", { hasText: "history" }).count(), 4, "every row is tagged history");
+    eq(n, 4, "rows after a reset, all in the pre-loaded history");
+    eq(await page.locator("details[data-history] tr[data-run-id]", { hasText: "history" }).count(), 4, "every row is tagged history and sits in the history section");
+    eq(await page.locator("details[data-history]").evaluate((d) => (d as HTMLDetailsElement).open), false, "the history section starts closed");
+    eq(await page.getByRole("region", { name: "Recent runs" }).count(), 0, "no table of runs made here yet");
     const total = await page.locator('[data-kpi="Total processed"]').innerText();
-    has(total, "4", "Total processed tile");
+    has(total, "0", "Total processed counts the runs made here, not the history");
     await shot(page, "reset-dashboard");
     eq(takeProblems(page), [], "browser console and network");
   });
@@ -454,26 +455,33 @@ async function sectionSamples(ctx: BrowserContext): Promise<void> {
   });
 }
 
-/** KPI figures the truth files predict after one click-through (history rows included). */
-function expectedKpis(): { total: number; approved: number; hold: number; rejected: number; security: number } {
+type Kpis = { total: number; approved: number; hold: number; rejected: number; security: number };
+
+/** KPI figures the truth files predict after one click-through: `all` as the API counts them (history included), `own` as the dashboard shows them (the runs made here). */
+function expectedKpis(): { all: Kpis; own: Kpis } {
   const count = (d: string) => samples.filter((s) => s.meta.expectedDecision === d).length;
-  return { total: 4 + samples.length, approved: 4 + count("APPROVE"), hold: count("HOLD"), rejected: count("REJECT"), security: samples.filter((s) => s.meta.expectedSecurityFlag).length };
+  const own = { total: samples.length, approved: count("APPROVE"), hold: count("HOLD"), rejected: count("REJECT"), security: samples.filter((s) => s.meta.expectedSecurityFlag).length };
+  return { own, all: { ...own, total: 4 + own.total, approved: 4 + own.approved } };
 }
 
+/** The rows of the runs made here (the folded pre-loaded history has its own table). */
+const OWN_ROWS = '[role="region"][aria-label="Recent runs"] tr[data-run-id]';
+
 async function sectionDashboard(page: Page): Promise<void> {
-  const want = expectedKpis();
-  await check("dashboard", "KPI tiles match the decisions of the click-through (and the API)", async () => {
+  const { all, own: want } = expectedKpis();
+  await check("dashboard", "KPI tiles match the decisions of the click-through, history left out (and the API counts it in)", async () => {
     await page.goto(`${BASE}/`);
     await page.waitForFunction(() => document.querySelectorAll("tr[data-run-id]").length >= 14);
-    const api = (await (await page.request.get(`${BASE}/api/runs?limit=200`)).json()) as { kpis: Record<string, number> };
+    const api = (await (await page.request.get(`${BASE}/api/runs?limit=200`)).json()) as { kpis: Record<string, number>; history_kpis: Record<string, number> };
     const tile = async (label: string) => (await page.locator(`[data-kpi="${label}"]`).innerText()).replace(/\s+/g, " ");
     has(await tile("Total processed"), String(want.total), "Total processed");
     has(await tile("Approved"), String(want.approved), "Approved");
     has(await tile("On hold"), String(want.hold), "On hold");
     has(await tile("Rejected"), String(want.rejected), "Rejected");
     has(await tile("Security flags"), String(want.security), "Security flags");
-    eq([api.kpis.total, api.kpis.approved, api.kpis.hold, api.kpis.rejected, api.kpis.security_flags], [want.total, want.approved, want.hold, want.rejected, want.security], "API KPIs");
-    const value = `$${api.kpis.approved_value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    eq([api.kpis.total, api.kpis.approved, api.kpis.hold, api.kpis.rejected, api.kpis.security_flags], [all.total, all.approved, all.hold, all.rejected, all.security], "API KPIs");
+    const ownValue = Math.round((api.kpis.approved_value - api.history_kpis.approved_value) * 100) / 100;
+    const value = `$${ownValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     has(await tile("Value approved"), value, "Value approved");
     await shot(page, "dashboard-all");
   });
@@ -482,10 +490,10 @@ async function sectionDashboard(page: Page): Promise<void> {
     for (const chip of ["APPROVE", "HOLD", "REJECT", "security", "all"]) {
       await page.locator(`button[data-filter="${chip}"]`).click();
       await page.waitForFunction((c) => document.querySelector(`button[data-filter="${c}"]`)?.getAttribute("aria-pressed") === "true", chip);
-      await page.waitForFunction((n) => document.querySelectorAll("tr[data-run-id]").length === n, counts[chip], { timeout: 10_000 });
-      const badges = await page.locator("tr[data-run-id] [data-decision]").evaluateAll((els) => els.map((e) => e.getAttribute("data-decision")));
+      await page.waitForFunction(([sel, n]) => document.querySelectorAll(sel).length === n, [OWN_ROWS, counts[chip]] as [string, number], { timeout: 10_000 });
+      const badges = await page.locator(`${OWN_ROWS} [data-decision]`).evaluateAll((els) => els.map((e) => e.getAttribute("data-decision")));
       if (chip === "security") {
-        eq(await page.locator("tr[data-run-id]").filter({ hasText: "Security flag" }).count(), counts[chip], "every security row has the shield");
+        eq(await page.locator(OWN_ROWS).filter({ hasText: "Security flag" }).count(), counts[chip], "every security row has the shield");
       } else if (chip !== "all") {
         ok(badges.every((b) => b === chip), `filter ${chip}: rows show ${show(badges)}`);
       }
@@ -504,7 +512,8 @@ async function sectionDashboard(page: Page): Promise<void> {
   });
   await check("dashboard", "a history row's link opens the pre-loaded record: its facts, no stepper, no PDF", async () => {
     await page.goto(`${BASE}/`);
-    const history = page.locator("tr[data-run-id]").filter({ hasText: "INV-0042" }).filter({ hasText: "history" });
+    await page.locator("details[data-history] > summary").click(); // the pre-loaded history starts folded away
+    const history = page.locator("details[data-history] tr[data-run-id]").filter({ hasText: "INV-0042" }).filter({ hasText: "history" });
     await history.waitFor();
     const id = await history.getAttribute("data-run-id");
     await history.getByRole("link").click();
@@ -618,7 +627,7 @@ async function sectionNarrow(): Promise<void> {
     const rows = await page.evaluate(() => {
       const frame = document.querySelector('[role="region"][aria-label="Recent runs"]')?.getBoundingClientRect();
       if (!frame) return null;
-      return Array.from(document.querySelectorAll("tr[data-run-id]")).map((tr) =>
+      return Array.from(document.querySelectorAll('[role="region"][aria-label="Recent runs"] tr[data-run-id]')).map((tr) =>
         Array.from(tr.querySelectorAll("[data-decision]")).some((el) => {
           const r = el.getBoundingClientRect();
           return r.width > 0 && r.height > 0 && getComputedStyle(el).display !== "none" && r.left >= frame.left - 1 && r.right <= frame.right + 1;

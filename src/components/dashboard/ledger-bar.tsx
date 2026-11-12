@@ -2,7 +2,7 @@ import { Money } from "@/components/shared/money";
 import type { DashboardKpis } from "@/lib/types";
 
 export interface LedgerBarProps {
-  /** The figures over ALL runs (the filter does not change them). null until the first response. */
+  /** The figures of the runs made here, the pre-loaded history left out (the filter does not change them). null until the first response. */
   kpis: DashboardKpis | null;
   /** true until the first response settles: the figures show skeletons. */
   loading: boolean;

@@ -157,6 +157,7 @@ interface RunJson {
 interface ListJson {
   runs: { id: string; created_at: string; decision: string | null; security_flag: boolean; is_history: boolean; first_reason: string | null }[];
   kpis: { total: number; approved: number; hold: number; rejected: number; security_flags: number; approved_value: number };
+  history_kpis: { total: number; approved: number; hold: number; rejected: number; security_flags: number; approved_value: number };
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -473,6 +474,8 @@ async function sectionLists(): Promise<void> {
       },
       "KPIs",
     );
+    const historyValue = Math.round(history.reduce((sum, h) => sum + h.total, 0) * 100) / 100;
+    eq(list.history_kpis, { total: 4, approved: 4, hold: 0, rejected: 0, security_flags: 0, approved_value: historyValue }, "history_kpis: the pre-loaded history alone");
   });
   await check(S, "GET /api/runs filters and limit: decision=, security, limit=, empty values; KPIs ignore both", async () => {
     const q = async (query: string) => (await http(`/api/runs${query}`, { ip: IP.lists })).json as ListJson;

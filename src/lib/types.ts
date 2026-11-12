@@ -866,7 +866,10 @@ export interface DashboardKpis {
 /** GET /api/runs?decision=APPROVE|HOLD|REJECT|security&limit=50 -> 200 */
 export interface RunsListResponse {
   runs: RunListItem[];
+  /** over every run, the pre-loaded history included; the filter and the limit do not change it */
   kpis: DashboardKpis;
+  /** the same figures over the pre-loaded history runs alone: the dashboard shows kpis minus these (the runs made here) */
+  history_kpis: DashboardKpis;
 }
 
 /** GET /api/samples -> 200 SampleListItem[] */

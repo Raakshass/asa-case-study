@@ -132,6 +132,8 @@ function RunRow({ run }: { run: RunListItem }) {
 
 export interface RunsTableProps {
   runs: RunListItem[];
+  /** the table's accessible name (its scroll region's label) */
+  label?: string;
 }
 
 /**
@@ -140,9 +142,9 @@ export interface RunsTableProps {
  * under the vendor, so a phone shows what happened to each invoice without scrolling the table. Every run text
  * is plain React text.
  */
-export function RunsTable({ runs }: RunsTableProps) {
+export function RunsTable({ runs, label = "Recent runs" }: RunsTableProps) {
   return (
-    <TableFrame label="Recent runs">
+    <TableFrame label={label}>
       <TableHeader>
         <TableRow className="hover:bg-transparent">
           <TableHead scope="col" className="px-3">
