@@ -1,6 +1,6 @@
 # Reviewer guide
 
-**Live:** https://asa-case-study.onrender.com · **Problem:** PS-1, invoice processing from PDF to decision.
+**Live:** https://asa-case-study.onrender.com · **Demo video (5:52):** https://www.loom.com/share/a953456a12ef4f8eae1d7d3034aa3e51 · **Problem:** PS-1, invoice processing from PDF to decision.
 
 ## What it does
 
